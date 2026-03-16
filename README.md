@@ -6,6 +6,10 @@ RemoteAgentServer now starts from a pnpm monorepo baseline so the control plane,
 
 ```bash
 pnpm install
+pnpm --filter @remote-agent-server/server build
+REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
+REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
+pnpm --filter @remote-agent-server/server dev
 pnpm build
 pnpm lint
 pnpm typecheck
@@ -14,6 +18,84 @@ pnpm verify
 ```
 
 `pnpm verify` is the root verification flow. It is intended to run both locally before commits and in CI on every push or pull request.
+
+## Control Plane
+
+The server app at `apps/server` is now a runnable control plane for the single-user self-hosted MVP. It exposes protected JSON APIs for:
+
+- hosts at `/api/hosts`
+- workspaces at `/api/workspaces`
+- sessions at `/api/sessions`
+- approvals at `/api/approvals`
+- notifications at `/api/notifications`
+- forwarded ports at `/api/ports`
+- real-time server-sent events at `/api/events`
+
+`GET /health` is public. The API surfaces require an operator token, except `POST /api/hosts`, which also accepts a bootstrap token so runtimes can enroll.
+
+### Local Run
+
+Development:
+
+```bash
+REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
+REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
+pnpm --filter @remote-agent-server/server dev
+```
+
+Built runtime:
+
+```bash
+pnpm --filter @remote-agent-server/server build
+REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
+REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
+pnpm --filter @remote-agent-server/server start
+```
+
+### Configuration
+
+The control plane loads configuration from explicit environment variables and can also merge a JSON config file:
+
+- `REMOTE_AGENT_SERVER_OPERATOR_TOKENS`: comma-separated operator tokens used with `Authorization: Bearer <token>`
+- `REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS`: comma-separated bootstrap tokens used with `x-bootstrap-token`
+- `REMOTE_AGENT_SERVER_HOST`: bind host, default `127.0.0.1`
+- `REMOTE_AGENT_SERVER_PORT`: bind port, default `4318`
+- `REMOTE_AGENT_SERVER_DATA_FILE`: JSON persistence path, default `.remote-agent-server/control-plane.json`
+- `REMOTE_AGENT_SERVER_CONFIG`: optional path to a JSON config file
+
+Example config file:
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 4318,
+  "dataFile": ".remote-agent-server/control-plane.json",
+  "operatorTokens": ["operator-dev-token"],
+  "bootstrapTokens": ["bootstrap-dev-token"]
+}
+```
+
+Core metadata for hosts, workspaces, sessions, approvals, notifications, and forwarded ports is persisted to the configured JSON file and reloaded on restart.
+
+### Manual Smoke Test
+
+Start the server, then register a host with the bootstrap token and inspect it with the operator token:
+
+```bash
+curl -sS \
+  -H 'x-bootstrap-token: bootstrap-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"id":"host-1","name":"devbox","platform":"linux","runtimeVersion":"0.1.0","status":"online"}' \
+  http://127.0.0.1:4318/api/hosts
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/hosts
+
+curl -N \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/events
+```
 
 ## Workspace Layout
 

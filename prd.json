@@ -56,7 +56,9 @@
         "The server has an explicit local run command and documented configuration",
         "The control plane has integration tests that exercise auth, persistence, and real-time event delivery"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a runnable Node-based control plane in apps/server with protected APIs for hosts, workspaces, sessions, approvals, notifications, forwarded ports, and server-sent events at /api/events; added JSON persistence with restart recovery and serialized writes; made operator/bootstrap tokens configurable through environment variables or a JSON config file; documented local run commands, configuration, and a manual smoke path in README.md; added apps/server package scripts for dev/start; and added integration coverage in tests/server-control-plane.test.ts for auth rejection, bootstrap host registration, persistence across restart, and real-time event delivery. Verified with pnpm verify."
     },
     {
       "id": "US-004",
