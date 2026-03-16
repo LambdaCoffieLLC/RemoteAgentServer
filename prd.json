@@ -54,7 +54,9 @@
         "The runtime reports version, health, and connectivity status",
         "The install flow is safe to rerun on an already configured host"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Added a documented Linux runtime install guide in docs/runtime-linux-install.md and linked it from README.md. Extended the control plane with bootstrap-token runtime enrollment and status endpoints that persist host runtime version, health, and connectivity in apps/server/src/index.ts, and replaced the runtime scaffold in apps/runtime/src/index.ts with idempotent Linux install helpers plus enrollment/status reporting functions. Added .agents/ralph/tests/us-004-runtime-linux-install.test.ts coverage for supported Linux docs, rerunnable installs, bootstrap enrollment, status reporting, and restart persistence, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-005",

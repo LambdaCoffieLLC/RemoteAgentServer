@@ -31,6 +31,7 @@ repo/
 │   ├── ui
 │   └── shared
 ├── docs/
+│   ├── runtime-linux-install.md
 │   └── shared-package-boundaries.md
 ├── prd.json
 ├── package.json
@@ -47,6 +48,7 @@ repo/
 ## Notes
 
 - `prd.json` remains the canonical execution spec.
+- `docs/runtime-linux-install.md` documents the supported Linux install flow for the remote runtime.
 - Shared package boundaries are documented in `docs/shared-package-boundaries.md`.
 - `.agents/ralph` contains the agent-specific runner, prompt rules, tests, and runtime logs.
 - `.agents/ralph/verification` stores per-story verification artifacts, including changed files and before/after automated-test counts for each attempt.

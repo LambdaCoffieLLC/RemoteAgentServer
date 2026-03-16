@@ -4,7 +4,18 @@ import { type AddressInfo } from 'node:net'
 import { dirname } from 'node:path'
 import { createAuthorizationPolicy, type AuthScope, type AuthenticatedActor } from '@remote-agent/auth'
 import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
-import { createManifest, type HostId, type IsoTimestamp, type ProtocolEnvelope, type SessionId, type WorkspaceId } from '@remote-agent/protocol'
+import {
+  createManifest,
+  type HostId,
+  type IsoTimestamp,
+  type ProtocolEnvelope,
+  type RuntimeConnectivityStatus,
+  type RuntimeHealthStatus,
+  type RuntimeId,
+  type RuntimeStatusSnapshot,
+  type SessionId,
+  type WorkspaceId,
+} from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
 import { createSessionSummary, type SessionStatus, type SessionSummary } from '@remote-agent/sessions'
 
@@ -19,6 +30,12 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type NotificationId = `notification_${string}`
 export type NotificationCategory = 'approval-required' | 'session-status' | 'port-exposed'
 
+export interface HostRuntimeRecord extends RuntimeStatusSnapshot {
+  label: string
+  enrolledAt: IsoTimestamp
+  enrollmentMethod: 'bootstrap-token'
+}
+
 export interface HostRecord {
   id: HostId
   label: string
@@ -26,6 +43,7 @@ export interface HostRecord {
   runtimeStatus: HostRuntimeStatus
   enrolledAt: IsoTimestamp
   lastSeenAt: IsoTimestamp
+  runtime?: HostRuntimeRecord
 }
 
 export interface WorkspaceRecord {
@@ -81,6 +99,7 @@ export interface ControlPlaneHttpHandle {
 
 export interface ControlPlaneServerOptions {
   actors?: Record<string, AuthenticatedActor>
+  bootstrapTokens?: readonly string[]
   clock?: () => IsoTimestamp
   storagePath?: string
   seedState?: Partial<ControlPlaneState>
@@ -116,6 +135,25 @@ interface CreateSessionInput {
 
 interface UpdateSessionInput {
   status: SessionStatus
+}
+
+interface EnrollRuntimeInput {
+  hostId: HostId
+  label: string
+  platform: HostPlatform
+  runtimeId: RuntimeId
+  runtimeLabel?: string
+  version: string
+  health: RuntimeHealthStatus
+  connectivity: RuntimeConnectivityStatus
+}
+
+interface ReportRuntimeStatusInput {
+  hostId: HostId
+  runtimeId: RuntimeId
+  version: string
+  health: RuntimeHealthStatus
+  connectivity: RuntimeConnectivityStatus
 }
 
 interface CreateApprovalInput {
@@ -178,6 +216,8 @@ const emptyState: ControlPlaneState = {
   notifications: [],
 }
 
+const defaultBootstrapTokens = ['bootstrap-development-runtime']
+
 export function describeServerApp() {
   const provider = coreProviderDescriptors.find(({ id }) => id === 'codex') ?? coreProviderDescriptors[0]
 
@@ -231,6 +271,8 @@ export function describeServerApp() {
 export class ControlPlaneServer {
   readonly actors: ReadonlyMap<string, AuthenticatedActor>
 
+  readonly bootstrapTokens: ReadonlySet<string>
+
   private readonly clock: () => IsoTimestamp
 
   private readonly storagePath?: string
@@ -244,6 +286,7 @@ export class ControlPlaneServer {
 
   private constructor(options: ControlPlaneServerOptions = {}) {
     this.actors = new Map(Object.entries(options.actors ?? defaultActors))
+    this.bootstrapTokens = new Set(options.bootstrapTokens ?? defaultBootstrapTokens)
     this.clock = options.clock ?? (() => new Date().toISOString())
     this.storagePath = options.storagePath
     this.state = mergeState(options.seedState)
@@ -273,18 +316,79 @@ export class ControlPlaneServer {
 
   async upsertHost(input: CreateHostInput) {
     const timestamp = this.clock()
+    const current = this.state.hosts.find((host) => host.id === input.id)
     const host: HostRecord = {
       id: input.id,
       label: input.label,
       platform: input.platform,
       runtimeStatus: input.runtimeStatus,
-      enrolledAt: input.enrolledAt ?? timestamp,
+      enrolledAt: input.enrolledAt ?? current?.enrolledAt ?? timestamp,
       lastSeenAt: input.lastSeenAt ?? timestamp,
+      runtime: current?.runtime ? { ...current.runtime } : undefined,
     }
 
     this.state.hosts = upsertRecord(this.state.hosts, host)
     await this.persistState()
     this.publishEvent('host.registered', { host })
+    return host
+  }
+
+  async enrollRuntime(input: EnrollRuntimeInput) {
+    const timestamp = this.clock()
+    const currentHost = this.state.hosts.find((host) => host.id === input.hostId)
+    const currentRuntime = currentHost?.runtime
+    const runtime: HostRuntimeRecord = {
+      runtimeId: input.runtimeId,
+      label: input.runtimeLabel ?? currentRuntime?.label ?? `${input.label} Runtime`,
+      version: input.version,
+      health: input.health,
+      connectivity: input.connectivity,
+      enrolledAt: currentRuntime?.enrolledAt ?? timestamp,
+      reportedAt: timestamp,
+      enrollmentMethod: 'bootstrap-token',
+    }
+    const host: HostRecord = {
+      id: input.hostId,
+      label: input.label,
+      platform: input.platform,
+      runtimeStatus: deriveRuntimeStatus(runtime),
+      enrolledAt: currentHost?.enrolledAt ?? timestamp,
+      lastSeenAt: timestamp,
+      runtime,
+    }
+
+    this.state.hosts = upsertRecord(this.state.hosts, host)
+    await this.persistState()
+    this.publishEvent('runtime.enrolled', { host })
+    return host
+  }
+
+  async reportRuntimeStatus(input: ReportRuntimeStatusInput) {
+    const currentHost = this.getHost(input.hostId)
+    const currentRuntime = currentHost.runtime
+
+    if (!currentRuntime || currentRuntime.runtimeId !== input.runtimeId) {
+      throw new ControlPlaneRequestError(404, 'runtime_not_found', `Runtime ${input.runtimeId} is not enrolled on host ${input.hostId}.`)
+    }
+
+    const timestamp = this.clock()
+    const runtime: HostRuntimeRecord = {
+      ...currentRuntime,
+      version: input.version,
+      health: input.health,
+      connectivity: input.connectivity,
+      reportedAt: timestamp,
+    }
+    const host: HostRecord = {
+      ...currentHost,
+      runtimeStatus: deriveRuntimeStatus(runtime),
+      lastSeenAt: timestamp,
+      runtime,
+    }
+
+    this.state.hosts = upsertRecord(this.state.hosts, host)
+    await this.persistState()
+    this.publishEvent('runtime.status.reported', { host })
     return host
   }
 
@@ -443,6 +547,58 @@ export class ControlPlaneServer {
     const pathSegments = url.pathname.split('/').filter(Boolean)
 
     try {
+      if (request.method === 'POST' && url.pathname === '/v1/runtime/enroll') {
+        if (!this.authorizeBootstrapToken(request, response)) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<EnrollRuntimeInput>
+
+        if (
+          !input.hostId ||
+          !input.label ||
+          !input.platform ||
+          !input.runtimeId ||
+          !input.version ||
+          !input.health ||
+          !input.connectivity
+        ) {
+          this.writeError(
+            response,
+            400,
+            'invalid_runtime_enrollment',
+            'Runtime enrollment requires hostId, label, platform, runtimeId, version, health, and connectivity.',
+          )
+          return
+        }
+
+        const alreadyEnrolled = this.state.hosts.some((host) => host.id === input.hostId)
+        const host = await this.enrollRuntime(input as EnrollRuntimeInput)
+        this.writeJson(response, alreadyEnrolled ? 200 : 201, { data: host })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/runtime/status') {
+        if (!this.authorizeBootstrapToken(request, response)) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<ReportRuntimeStatusInput>
+
+        if (!input.hostId || !input.runtimeId || !input.version || !input.health || !input.connectivity) {
+          this.writeError(
+            response,
+            400,
+            'invalid_runtime_status',
+            'Runtime status reports require hostId, runtimeId, version, health, and connectivity.',
+          )
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.reportRuntimeStatus(input as ReportRuntimeStatusInput) })
+        return
+      }
+
       if (request.method === 'GET' && url.pathname === '/v1/events') {
         const actor = this.authorizeRequest(request, response, 'sessions:read')
 
@@ -744,10 +900,36 @@ export class ControlPlaneServer {
     return actor
   }
 
+  private authorizeBootstrapToken(request: IncomingMessage, response: ServerResponse<IncomingMessage>) {
+    const bootstrapToken = request.headers['x-bootstrap-token']
+
+    if (typeof bootstrapToken !== 'string' || bootstrapToken.length === 0) {
+      this.writeError(response, 401, 'unauthorized', 'A bootstrap token is required.')
+      return undefined
+    }
+
+    if (!this.bootstrapTokens.has(bootstrapToken)) {
+      this.writeError(response, 401, 'unauthorized', 'The provided bootstrap token is not recognized.')
+      return undefined
+    }
+
+    return bootstrapToken
+  }
+
   private assertHostExists(id: HostId) {
     if (!this.state.hosts.some((host) => host.id === id)) {
       throw new ControlPlaneRequestError(404, 'host_not_found', `Host ${id} is not registered.`)
     }
+  }
+
+  private getHost(id: HostId) {
+    const host = this.state.hosts.find((entry) => entry.id === id)
+
+    if (!host) {
+      throw new ControlPlaneRequestError(404, 'host_not_found', `Host ${id} is not registered.`)
+    }
+
+    return host
   }
 
   private assertWorkspaceExists(id: WorkspaceId) {
@@ -881,7 +1063,14 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
 
 function cloneState(state: ControlPlaneState): ControlPlaneState {
   return {
-    hosts: state.hosts.map((host) => ({ ...host })),
+    hosts: state.hosts.map((host) => ({
+      ...host,
+      runtime: host.runtime
+        ? {
+            ...host.runtime,
+          }
+        : undefined,
+    })),
     workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
     sessions: state.sessions.map((session) => createSessionSummary(session)),
     approvals: state.approvals.map((approval) => ({
@@ -912,6 +1101,14 @@ function pickActorIdentity(actor?: AuthenticatedActor) {
 
 function toNotificationId(id: string): NotificationId {
   return `notification_${id.replace(/^[^_]+_/, '')}`
+}
+
+function deriveRuntimeStatus(runtime: Pick<HostRuntimeRecord, 'connectivity' | 'health'>): HostRuntimeStatus {
+  if (runtime.connectivity === 'disconnected') {
+    return 'offline'
+  }
+
+  return runtime.health === 'healthy' ? 'online' : 'degraded'
 }
 
 async function readJsonBody(request: IncomingMessage) {
