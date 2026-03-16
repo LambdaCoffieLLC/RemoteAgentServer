@@ -72,7 +72,9 @@
         "The repo includes a concrete installer or install helper that matches the documented flow",
         "The install and enrollment flow has automated integration coverage"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a concrete Linux install helper at packages/runtime/scripts/install-linux-runtime.sh plus a runtime CLI for enroll/status reporting in packages/runtime/src/cli.ts and packages/runtime/src/status.ts; documented the supported Linux prerequisites, install steps, rerun-safe behavior, enrollment command, and verification flow in README.md; extended host enrollment records so the runtime reports runtimeVersion, health, connectivity, and lastSeenAt through the control plane; and added product-owned integration coverage in tests/runtime-install.test.ts that builds the runtime, runs the installer twice, enrolls with a bootstrap token, verifies local status output, and confirms the control plane upserts a single host record. Verified with pnpm lint, pnpm typecheck, and pnpm test."
     },
     {
       "id": "US-005",

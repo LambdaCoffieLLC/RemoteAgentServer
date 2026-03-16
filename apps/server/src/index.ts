@@ -22,7 +22,10 @@ export interface HostRecord {
   platform: string
   runtimeVersion: string
   status: 'online' | 'offline'
+  health: 'healthy' | 'degraded' | 'unhealthy'
+  connectivity: 'connected' | 'disconnected'
   registeredAt: string
+  lastSeenAt: string
 }
 
 export interface WorkspaceRecord {
@@ -252,17 +255,28 @@ function sendError(response: ServerResponse, statusCode: number, error: string) 
 }
 
 async function readJsonBody<T>(request: IncomingMessage) {
-  const chunks: Buffer[] = []
+  return await new Promise<T>((resolveBody, rejectBody) => {
+    let body = ''
 
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-  }
+    request.setEncoding('utf8')
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      if (body.length === 0) {
+        resolveBody({} as T)
+        return
+      }
 
-  if (chunks.length === 0) {
-    return {} as T
-  }
-
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T
+      try {
+        resolveBody(JSON.parse(body) as T)
+      } catch (error) {
+        rejectBody(error)
+      }
+    })
+    request.on('error', rejectBody)
+    request.resume()
+  })
 }
 
 function getBearerToken(request: IncomingMessage) {
@@ -361,13 +375,18 @@ function requireHostRecord(body: unknown): HostRecord {
     throw new Error('Request body must be a JSON object.')
   }
 
+  const timestamp = new Date().toISOString()
+
   return {
     id: requireString(record.id ?? `host-${randomUUID()}`, 'id'),
     name: requireString(record.name, 'name'),
     platform: requireString(record.platform, 'platform'),
     runtimeVersion: requireString(record.runtimeVersion, 'runtimeVersion'),
     status: requireEnum(record.status ?? 'online', 'status', ['online', 'offline']),
-    registeredAt: typeof record.registeredAt === 'string' ? record.registeredAt : new Date().toISOString(),
+    health: requireEnum(record.health ?? 'healthy', 'health', ['healthy', 'degraded', 'unhealthy']),
+    connectivity: requireEnum(record.connectivity ?? 'connected', 'connectivity', ['connected', 'disconnected']),
+    registeredAt: typeof record.registeredAt === 'string' ? record.registeredAt : timestamp,
+    lastSeenAt: typeof record.lastSeenAt === 'string' ? record.lastSeenAt : timestamp,
   }
 }
 
@@ -727,6 +746,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
 
           resolveClose()
         })
+
+        server.closeIdleConnections()
+        server.closeAllConnections()
       })
     },
   }

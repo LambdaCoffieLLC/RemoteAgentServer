@@ -4,6 +4,8 @@ import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope
 import { createProviderDescriptor, type ProviderDescriptor } from '@remote-agent-server/providers'
 import { createSessionDescriptor, type SessionDescriptor } from '@remote-agent-server/sessions'
 
+export * from './status.js'
+
 export interface RuntimeManifest {
   id: string
   kind: 'runtime'

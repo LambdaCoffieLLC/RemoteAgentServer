@@ -2,9 +2,13 @@
   "name": "@remote-agent-server/runtime",
   "private": true,
   "type": "module",
+  "version": "0.1.0",
   "main": "dist/index.js",
   "types": "src/index.ts",
-  "files": ["dist"],
+  "bin": {
+    "remote-agent-runtime": "dist/cli.js"
+  },
+  "files": ["dist", "scripts/install-linux-runtime.sh"],
   "dependencies": {
     "@remote-agent-server/auth": "workspace:*",
     "@remote-agent-server/ports": "workspace:*",

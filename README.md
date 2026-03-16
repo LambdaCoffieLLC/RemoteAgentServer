@@ -33,6 +33,74 @@ The server app at `apps/server` is now a runnable control plane for the single-u
 
 `GET /health` is public. The API surfaces require an operator token, except `POST /api/hosts`, which also accepts a bootstrap token so runtimes can enroll.
 
+## Remote Linux Runtime Install
+
+`US-004` is implemented as a helper-driven Linux install flow for hosts that have:
+
+- Bash and standard coreutils
+- Node.js 20+
+- A checkout of this repository with `pnpm install` already run
+
+This flow is intended for modern Linux distributions that satisfy those prerequisites, including Ubuntu, Debian, Fedora, and RHEL-derived hosts.
+
+### Build And Install
+
+On the remote Linux host:
+
+```bash
+pnpm install
+pnpm --filter @remote-agent-server/runtime build
+
+./packages/runtime/scripts/install-linux-runtime.sh \
+  --prefix "$HOME/.remote-agent-runtime" \
+  --server-url "http://127.0.0.1:4318" \
+  --bootstrap-token "bootstrap-dev-token" \
+  --host-id "devbox-1" \
+  --host-name "devbox"
+```
+
+The installer stages the built runtime under the chosen prefix and writes:
+
+- `bin/remote-agent-runtime`
+- `bin/remote-agent-runtime-enroll`
+- `bin/remote-agent-runtime-status`
+- `etc/remote-agent-runtime.env`
+- `var/runtime-state.json` after enrollment succeeds
+
+The helper is safe to rerun. Reinstalling replaces the managed runtime files in place, refreshes the generated wrappers and environment file, and keeps the same host identity when you reuse the same `--host-id`.
+
+### Enroll And Verify
+
+Enroll the installed runtime with the control plane:
+
+```bash
+$HOME/.remote-agent-runtime/bin/remote-agent-runtime-enroll
+```
+
+Inspect the local runtime state:
+
+```bash
+$HOME/.remote-agent-runtime/bin/remote-agent-runtime-status
+```
+
+The runtime upserts its host record through `POST /api/hosts` using the bootstrap token and reports:
+
+- `runtimeVersion`
+- `status`
+- `health`
+- `connectivity`
+- `lastSeenAt`
+
+Verify the host from the control plane:
+
+```bash
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/hosts
+```
+
+Rerunning `$HOME/.remote-agent-runtime/bin/remote-agent-runtime-enroll` is also safe. The server upserts the same host record by `id` instead of creating duplicates.
+
 ### Local Run
 
 Development:
