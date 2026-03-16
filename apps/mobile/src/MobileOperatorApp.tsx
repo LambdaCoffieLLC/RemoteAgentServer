@@ -42,6 +42,10 @@ function getStateTone(state: string) {
   return styles.stateToneMuted
 }
 
+function formatOutputPreview(text: string) {
+  return text.trim().replaceAll('\n', ' ')
+}
+
 export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
   const state = useSyncExternalStore(
     controller.subscribe,
@@ -127,6 +131,17 @@ export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
     }
   }
 
+  function handleOpenSession(sessionId: string) {
+    try {
+      controller.openSession(sessionId)
+    } catch (error) {
+      Alert.alert(
+        'Resume session failed',
+        error instanceof Error ? error.message : 'Resume session failed.',
+      )
+    }
+  }
+
   async function handleForgetConnection() {
     try {
       await controller.forgetConnection()
@@ -144,6 +159,11 @@ export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
   const pendingApprovals = state.dashboard.approvals.filter(
     (approval) => approval.status === 'pending',
   )
+  const selectedSession = state.selectedSessionId
+    ? state.dashboard.sessions.find((session) => session.id === state.selectedSessionId)
+    : undefined
+  const recentLogs = selectedSession?.logs.slice(-4).reverse() ?? []
+  const recentOutput = selectedSession?.output.slice(-4).reverse() ?? []
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -341,6 +361,67 @@ export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
                 </View>
 
                 <View style={styles.surfaceCard}>
+                  <Text style={styles.sectionTitle}>Recovered session context</Text>
+                  {!selectedSession
+                    ? (
+                        <Text style={styles.supportText}>
+                          Pick a session below to reopen its recovered state, recent logs, and recent messages from another device.
+                        </Text>
+                      )
+                    : (
+                        <>
+                          <View style={styles.listCard}>
+                            <View style={styles.spaceBetweenRow}>
+                              <Text style={styles.cardTitle}>{selectedSession.id}</Text>
+                              <Text style={[styles.connectionPill, getStateTone(selectedSession.state)]}>
+                                {selectedSession.state}
+                              </Text>
+                            </View>
+                            <Text style={styles.cardBody}>
+                              {getProviderDisplayName(selectedSession.provider as 'claude-code' | 'codex' | 'opencode')}
+                            </Text>
+                            <Text style={styles.metaLine}>Workspace: {selectedSession.workspaceId}</Text>
+                            <Text style={styles.metaLine}>Path: {selectedSession.workspacePath}</Text>
+                            <Text style={styles.metaLine}>Created: {formatTimestamp(selectedSession.createdAt)}</Text>
+                            <Text style={styles.metaLine}>Updated: {formatTimestamp(selectedSession.updatedAt)}</Text>
+                            {selectedSession.startedAt
+                              ? <Text style={styles.metaLine}>Started: {formatTimestamp(selectedSession.startedAt)}</Text>
+                              : null}
+                            {selectedSession.completedAt
+                              ? <Text style={styles.metaLine}>Completed: {formatTimestamp(selectedSession.completedAt)}</Text>
+                              : null}
+                          </View>
+                          <View style={styles.historySection}>
+                            <Text style={styles.historyLabel}>Recent logs</Text>
+                            {recentLogs.length === 0
+                              ? <Text style={styles.supportText}>No logs recovered yet.</Text>
+                              : recentLogs.map((entry) => (
+                                  <View key={entry.id} style={styles.historyCard}>
+                                    <Text style={styles.metaLine}>
+                                      {entry.level} • {formatTimestamp(entry.timestamp)}
+                                    </Text>
+                                    <Text style={styles.historyText}>{entry.message}</Text>
+                                  </View>
+                                ))}
+                          </View>
+                          <View style={styles.historySection}>
+                            <Text style={styles.historyLabel}>Recent messages</Text>
+                            {recentOutput.length === 0
+                              ? <Text style={styles.supportText}>No output recovered yet.</Text>
+                              : recentOutput.map((entry) => (
+                                  <View key={entry.id} style={styles.historyCard}>
+                                    <Text style={styles.metaLine}>
+                                      {entry.stream} • {formatTimestamp(entry.timestamp)}
+                                    </Text>
+                                    <Text style={styles.historyText}>{formatOutputPreview(entry.text)}</Text>
+                                  </View>
+                                ))}
+                          </View>
+                        </>
+                      )}
+                </View>
+
+                <View style={styles.surfaceCard}>
                   <Text style={styles.sectionTitle}>Live sessions</Text>
                   {state.dashboard.sessions.length === 0
                     ? <Text style={styles.supportText}>No sessions are visible right now.</Text>
@@ -365,6 +446,29 @@ export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
                                 </View>
                               )
                             : null}
+                          <Pressable
+                            onPress={() => {
+                              handleOpenSession(session.id)
+                            }}
+                            style={[
+                              styles.button,
+                              state.selectedSessionId === session.id
+                                ? styles.primaryButton
+                                : styles.secondaryButton,
+                            ]}
+                          >
+                            <Text
+                              style={
+                                state.selectedSessionId === session.id
+                                  ? styles.primaryButtonLabel
+                                  : styles.secondaryButtonLabel
+                              }
+                            >
+                              {state.selectedSessionId === session.id
+                                ? 'Context open'
+                                : 'Resume context'}
+                            </Text>
+                          </Pressable>
                         </View>
                       ))}
                 </View>
@@ -632,5 +736,26 @@ const styles = StyleSheet.create({
     color: '#fff7ed',
     fontSize: 13,
     lineHeight: 18,
+  },
+  historySection: {
+    gap: 10,
+  },
+  historyLabel: {
+    color: '#4f3427',
+    fontFamily: 'Courier',
+    fontSize: 12,
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+  },
+  historyCard: {
+    backgroundColor: '#f6ede2',
+    borderRadius: 18,
+    gap: 6,
+    padding: 14,
+  },
+  historyText: {
+    color: '#221712',
+    fontSize: 14,
+    lineHeight: 20,
   },
 })

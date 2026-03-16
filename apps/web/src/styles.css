@@ -198,6 +198,11 @@ input {
   border: 1px solid rgba(159, 177, 197, 0.12);
 }
 
+.session-card.selected-session,
+.session-history-card {
+  border-color: rgba(244, 201, 93, 0.28);
+}
+
 .inventory-header {
   display: flex;
   justify-content: space-between;
@@ -346,6 +351,48 @@ input {
   overflow: hidden;
 }
 
+.history-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.history-entry {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.42);
+  border: 1px solid rgba(159, 177, 197, 0.14);
+}
+
+.history-entry p:last-child {
+  margin: 0;
+}
+
+.compact-empty-state {
+  padding: 12px 0 0;
+}
+
+.panel-divider {
+  height: 1px;
+  margin: 22px 0;
+  background: rgba(159, 177, 197, 0.12);
+}
+
+.compact-section-header {
+  margin-bottom: 12px;
+}
+
 .review-shell {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -429,7 +476,8 @@ input {
   .hero-panel,
   .connection-panel,
   .content-grid,
-  .review-shell {
+  .review-shell,
+  .history-grid {
     grid-template-columns: 1fr;
   }
 }

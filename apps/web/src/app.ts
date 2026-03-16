@@ -17,6 +17,7 @@ const storageKey = 'remote-agent-server-web-connection-v1'
 const maxVisibleEvents = 16
 const diffPageSize = 28
 const reconnectDelayMs = 1500
+const recentHistoryLimit = 4
 
 interface ConnectionSettings {
   baseUrl: string
@@ -44,6 +45,7 @@ interface ReviewState {
 interface WebClientState {
   connection?: ConnectionSettings
   dashboard?: DashboardData
+  selectedSessionId?: string
   events: ControlPlaneEventRecord[]
   lastEventId?: string
   loading: boolean
@@ -58,10 +60,16 @@ export interface RenderWebClientOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 }
 
-function sortByNewest<T extends { createdAt?: string; requestedAt?: string; timestamp?: string }>(records: T[]) {
+function sortByNewest<T extends { updatedAt?: string; createdAt?: string; requestedAt?: string; timestamp?: string }>(
+  records: T[],
+) {
   return [...records].sort((left, right) => {
-    const leftTime = Date.parse(left.createdAt ?? left.requestedAt ?? left.timestamp ?? '')
-    const rightTime = Date.parse(right.createdAt ?? right.requestedAt ?? right.timestamp ?? '')
+    const leftTime = Date.parse(
+      left.updatedAt ?? left.createdAt ?? left.requestedAt ?? left.timestamp ?? '',
+    )
+    const rightTime = Date.parse(
+      right.updatedAt ?? right.createdAt ?? right.requestedAt ?? right.timestamp ?? '',
+    )
     return rightTime - leftTime
   })
 }
@@ -90,6 +98,10 @@ function formatTimestamp(value?: string) {
 
 function formatSessionMode(session: SessionRecord) {
   return session.mode === 'worktree' ? 'Isolated worktree' : 'Direct workspace'
+}
+
+function formatOutputPreview(text: string) {
+  return text.trim().replaceAll('\n', ' ')
 }
 
 function renderCount(label: string, value: number) {
@@ -153,7 +165,7 @@ function renderWorkspaces(workspaces: WorkspaceRecord[]) {
     .join('')
 }
 
-function renderSessions(sessions: SessionRecord[]) {
+function renderSessions(sessions: SessionRecord[], selectedSessionId?: string) {
   if (sessions.length === 0) {
     return '<p class="empty-state">No sessions yet.</p>'
   }
@@ -161,7 +173,7 @@ function renderSessions(sessions: SessionRecord[]) {
   return sortByNewest(sessions)
     .map(
       (session) => `
-        <article class="surface-card inventory-card session-card">
+        <article class="surface-card inventory-card session-card ${selectedSessionId === session.id ? 'selected-session' : ''}">
           <header class="inventory-header">
             <div>
               <h3>${escapeHtml(session.id)}</h3>
@@ -177,6 +189,9 @@ function renderSessions(sessions: SessionRecord[]) {
           </dl>
           <p class="code-path">${escapeHtml(session.executionPath)}</p>
           <div class="card-actions">
+            <button class="accent-button" data-action="resume-session" data-session-id="${escapeHtml(session.id)}">
+              ${selectedSessionId === session.id ? 'Context open' : 'Resume context'}
+            </button>
             <button class="secondary-button" data-action="review-session" data-session-id="${escapeHtml(session.id)}">
               Review diff
             </button>
@@ -185,6 +200,83 @@ function renderSessions(sessions: SessionRecord[]) {
       `,
     )
     .join('')
+}
+
+function renderSessionHistory(session?: SessionRecord) {
+  if (!session) {
+    return '<p class="empty-state">Pick a session to reopen its recovered state, recent logs, and recent messages.</p>'
+  }
+
+  const recentLogs = session.logs.slice(-recentHistoryLimit).reverse()
+  const recentOutput = session.output.slice(-recentHistoryLimit).reverse()
+
+  return `
+    <div class="history-stack">
+      <article class="inventory-card session-history-card">
+        <header class="inventory-header">
+          <div>
+            <p class="eyebrow">Recovered session</p>
+            <h3>${escapeHtml(session.id)}</h3>
+            <p>${escapeHtml(getProviderLabel(session.provider as 'claude-code' | 'codex' | 'opencode'))}</p>
+          </div>
+          <span class="status-pill ${escapeHtml(session.state)}">${escapeHtml(session.state)}</span>
+        </header>
+        <dl class="meta-grid">
+          <div><dt>Workspace</dt><dd>${escapeHtml(session.workspaceId)}</dd></div>
+          <div><dt>Mode</dt><dd>${escapeHtml(formatSessionMode(session))}</dd></div>
+          <div><dt>Created</dt><dd>${escapeHtml(formatTimestamp(session.createdAt))}</dd></div>
+          <div><dt>Updated</dt><dd>${escapeHtml(formatTimestamp(session.updatedAt))}</dd></div>
+          <div><dt>Started</dt><dd>${escapeHtml(formatTimestamp(session.startedAt))}</dd></div>
+          <div><dt>Completed</dt><dd>${escapeHtml(formatTimestamp(session.completedAt))}</dd></div>
+        </dl>
+        <p class="code-path">${escapeHtml(session.workspacePath)}</p>
+      </article>
+      <div class="history-grid">
+        <section>
+          <p class="eyebrow">Recent logs</p>
+          ${
+            recentLogs.length === 0
+              ? '<p class="empty-state compact-empty-state">No logs recovered yet.</p>'
+              : `
+                <div class="history-list">
+                  ${recentLogs
+                    .map(
+                      (entry) => `
+                        <article class="history-entry">
+                          <p class="event-type">${escapeHtml(entry.level)} • ${escapeHtml(formatTimestamp(entry.timestamp))}</p>
+                          <p>${escapeHtml(entry.message)}</p>
+                        </article>
+                      `,
+                    )
+                    .join('')}
+                </div>
+              `
+          }
+        </section>
+        <section>
+          <p class="eyebrow">Recent messages</p>
+          ${
+            recentOutput.length === 0
+              ? '<p class="empty-state compact-empty-state">No output recovered yet.</p>'
+              : `
+                <div class="history-list">
+                  ${recentOutput
+                    .map(
+                      (entry) => `
+                        <article class="history-entry">
+                          <p class="event-type">${escapeHtml(entry.stream)} • ${escapeHtml(formatTimestamp(entry.timestamp))}</p>
+                          <p>${escapeHtml(formatOutputPreview(entry.text))}</p>
+                        </article>
+                      `,
+                    )
+                    .join('')}
+                </div>
+              `
+          }
+        </section>
+      </div>
+    </div>
+  `
 }
 
 function renderApprovals(approvals: ProviderApprovalRecord[], busyId?: string) {
@@ -473,11 +565,19 @@ function renderAppShell(state: WebClientState) {
             <p class="eyebrow">Sessions</p>
             <h2>Active and historical runs</h2>
           </header>
-          <div class="panel-list">${renderSessions(dashboard?.sessions ?? [])}</div>
+          <div class="panel-list">${renderSessions(dashboard?.sessions ?? [], state.selectedSessionId)}</div>
         </article>
 
         <article class="panel-stack review-panel">
           <header class="section-header">
+            <p class="eyebrow">Session recovery</p>
+            <h2>Recovered context and diffs</h2>
+          </header>
+          ${renderSessionHistory(
+            dashboard?.sessions.find((session) => session.id === state.selectedSessionId),
+          )}
+          <div class="panel-divider"></div>
+          <header class="section-header compact-section-header">
             <p class="eyebrow">Diff review</p>
             <h2>Changed files and patch pages</h2>
           </header>
@@ -622,6 +722,12 @@ export function renderWebClient(
         forwardedPorts,
         detectedPorts,
       }
+      if (
+        state.selectedSessionId &&
+        !sessions.some((session) => session.id === state.selectedSessionId)
+      ) {
+        state.selectedSessionId = undefined
+      }
     } catch (error) {
       state.error = error instanceof Error ? error.message : 'Failed to load data.'
     } finally {
@@ -720,6 +826,7 @@ export function renderWebClient(
     state.events = []
     state.lastEventId = undefined
     state.review = undefined
+    state.selectedSessionId = undefined
     await refreshDashboard()
     connectEvents(state.connection)
   }
@@ -833,6 +940,7 @@ export function renderWebClient(
       client = undefined
       state.connection = undefined
       state.dashboard = undefined
+      state.selectedSessionId = undefined
       state.events = []
       state.review = undefined
       state.error = undefined
@@ -843,7 +951,17 @@ export function renderWebClient(
     if (action === 'review-session') {
       const sessionId = actionButton.dataset.sessionId
       if (sessionId) {
+        state.selectedSessionId = sessionId
         void loadReview(sessionId)
+      }
+      return
+    }
+
+    if (action === 'resume-session') {
+      const sessionId = actionButton.dataset.sessionId
+      if (sessionId) {
+        state.selectedSessionId = sessionId
+        render()
       }
       return
     }

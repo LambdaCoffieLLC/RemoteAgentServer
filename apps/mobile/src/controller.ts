@@ -137,6 +137,19 @@ function filterPreviewPorts(ports: ForwardedPortRecord[]) {
   )
 }
 
+function resolveSelectedSessionId(
+  selectedSessionId: string | undefined,
+  sessions: SessionRecord[],
+) {
+  if (!selectedSessionId) {
+    return undefined
+  }
+
+  return sessions.some((session) => session.id === selectedSessionId)
+    ? selectedSessionId
+    : undefined
+}
+
 export class MobileOperatorController {
   private readonly listeners = new Set<StateListener>()
   private readonly reconnectDelayMs: number
@@ -186,6 +199,7 @@ export class MobileOperatorController {
         ...this.state,
         phase: 'signed-out',
         liveConnection: 'idle',
+        selectedSessionId: undefined,
       })
       return
     }
@@ -223,14 +237,19 @@ export class MobileOperatorController {
       }
 
       this.client = client
+      const sortedSessions = sortByNewest(sessions)
       this.setState({
         ...this.state,
         phase: 'ready',
         liveConnection: 'connecting',
         connection: settings,
+        selectedSessionId: resolveSelectedSessionId(
+          this.state.selectedSessionId,
+          sortedSessions,
+        ),
         dashboard: {
           hosts,
-          sessions: sortByNewest(sessions),
+          sessions: sortedSessions,
           approvals: sortByNewest(approvals),
           forwardedPorts: filterPreviewPorts(forwardedPorts),
         },
@@ -245,6 +264,7 @@ export class MobileOperatorController {
         liveConnection: 'idle',
         connection: settings,
         dashboard: createEmptyDashboard(),
+        selectedSessionId: undefined,
         error:
           error instanceof Error
             ? error.message
@@ -264,15 +284,33 @@ export class MobileOperatorController {
       this.client.listApprovals(),
       this.client.listPorts(),
     ])
+    const sortedSessions = sortByNewest(sessions)
 
     this.setState({
       ...this.state,
+      selectedSessionId: resolveSelectedSessionId(
+        this.state.selectedSessionId,
+        sortedSessions,
+      ),
       dashboard: {
         hosts,
-        sessions: sortByNewest(sessions),
+        sessions: sortedSessions,
         approvals: sortByNewest(approvals),
         forwardedPorts: filterPreviewPorts(forwardedPorts),
       },
+      error: undefined,
+    })
+  }
+
+  openSession(sessionId: string) {
+    const session = this.state.dashboard.sessions.find((entry) => entry.id === sessionId)
+    if (!session) {
+      throw new Error(`Session "${sessionId}" is not available in the mobile dashboard.`)
+    }
+
+    this.setState({
+      ...this.state,
+      selectedSessionId: session.id,
       error: undefined,
     })
   }
@@ -334,6 +372,7 @@ export class MobileOperatorController {
       phase: 'signed-out',
       liveConnection: 'idle',
       dashboard: createEmptyDashboard(),
+      selectedSessionId: undefined,
     })
   }
 
@@ -362,9 +401,15 @@ export class MobileOperatorController {
         return
       }
 
+      const nextSessions = applySessionEvent(this.state.dashboard.sessions, event)
+
       this.setState({
         ...this.state,
         liveConnection: 'live',
+        selectedSessionId: resolveSelectedSessionId(
+          this.state.selectedSessionId,
+          nextSessions,
+        ),
         lastEventId: event.id,
         lastEventType: event.envelope.type,
         dashboard: {
@@ -377,7 +422,7 @@ export class MobileOperatorController {
                   ),
                 )
               : this.state.dashboard.hosts,
-          sessions: applySessionEvent(this.state.dashboard.sessions, event),
+          sessions: nextSessions,
           approvals: applyApprovalEvent(this.state.dashboard.approvals, event),
           forwardedPorts: filterPreviewPorts(
             applyPortEvent(this.state.dashboard.forwardedPorts, event),

@@ -113,6 +113,7 @@ export interface MobileOperatorState {
   liveConnection: LiveConnectionState
   connection?: MobileConnectionSettings
   dashboard: MobileDashboardSnapshot
+  selectedSessionId?: string
   busyApprovalId?: string
   error?: string
   lastEventId?: string

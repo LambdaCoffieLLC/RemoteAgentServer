@@ -268,7 +268,9 @@
         "Temporary disconnects do not destroy active session state",
         "Recovery behavior is covered by automated integration tests across more than one client surface"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended the web and mobile operator surfaces so sessions can be explicitly reopened with recovered metadata, recent logs, and recent output messages via Resume context, while preserving the selected session across refresh and reconnect. Added cross-surface recovery coverage in tests/session-recovery-clients.test.ts to reopen the same persisted session from both mobile and web, and retained existing temporary-disconnect recovery evidence in tests/server-control-plane.test.ts for SSE reconnect and preserved active session state. Verified with pnpm exec eslint apps/web/src/app.ts apps/mobile/src/controller.ts apps/mobile/src/types.ts apps/mobile/src/MobileOperatorApp.tsx tests/session-recovery-clients.test.ts, pnpm exec tsc -p apps/web/tsconfig.json --noEmit, pnpm exec tsc -p apps/mobile/tsconfig.json --noEmit, pnpm exec tsc -p tsconfig.json --noEmit, and node --import tsx --test tests/session-recovery-clients.test.ts tests/web-client-smoke.test.ts tests/mobile-app-smoke.test.ts."
     },
     {
       "id": "US-018",

@@ -78,9 +78,10 @@ With the control plane running and seeded with at least one host, workspace, and
 1. Open the web app and sign in with the operator token.
 2. Confirm the dashboard lists hosts, workspaces, sessions, forwarded previews, and detected ports.
 3. Start or wait for a session so the live event panel receives `session.*` or `approval.*` events.
-4. Open a session review from the Sessions panel and page through its diff.
-5. Approve or reject a pending privileged action from the Approvals panel.
-6. Open a shared HTTP preview from the Forwarded previews panel.
+4. Use `Resume context` on an existing session to reopen its recovered metadata plus recent logs and output messages.
+5. Open a session review from the Sessions panel and page through its diff.
+6. Approve or reject a pending privileged action from the Approvals panel.
+7. Open a shared HTTP preview from the Forwarded previews panel.
 
 ## Mobile App
 
@@ -88,6 +89,7 @@ The mobile app at `apps/mobile` is now a runnable Expo client for the same opera
 
 - token-based sign-in against a control-plane base URL
 - browsing registered hosts and live sessions
+- reopening an existing session with recovered metadata, recent logs, and recent output
 - streaming real-time session and approval updates from `/api/events`
 - approving or rejecting pending privileged actions
 - opening shared HTTP previews either in-app or in the system browser
@@ -118,9 +120,10 @@ With the control plane running and seeded with at least one host, workspace, and
 1. Open the Expo app and enter the control-plane URL plus operator token.
 2. Confirm the mobile dashboard lists the enrolled host and any active sessions.
 3. Start or wait for a session and confirm the session card updates as live `session.*` and `approval.*` events arrive.
-4. Approve or reject a pending privileged action from the Pending approvals section.
-5. Open a shared HTTP preview with either `In app` or `Browser`.
-6. Close and relaunch the Expo app to confirm the saved control-plane URL and token reconnect automatically.
+4. Tap `Resume context` on a session and confirm the recovered state shows recent logs and output messages.
+5. Approve or reject a pending privileged action from the Pending approvals section.
+6. Open a shared HTTP preview with either `In app` or `Browser`.
+7. Close and relaunch the Expo app to confirm the saved control-plane URL and token reconnect automatically.
 
 ## Remote Linux Runtime Install
 
@@ -265,7 +268,7 @@ The control plane starts the session against the workspace's runtime host, persi
 - `session.output` for stdout or stderr chunks
 - `session.snapshot` on a fresh SSE connection so reconnecting clients can recover active session state
 
-Workspace mode keeps the execution path pointed at the registered repository for simple workflows. Worktree mode creates a sibling checkout under `.remote-agent-server-worktrees/<workspace-id>/...`, stores the worktree path and branch metadata on the session record, and points runtime execution at that isolated checkout instead. Clients can inspect the current recoverable session state, including accumulated logs, output, `executionPath`, and optional `worktree` metadata, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
+Workspace mode keeps the execution path pointed at the registered repository for simple workflows. Worktree mode creates a sibling checkout under `.remote-agent-server-worktrees/<workspace-id>/...`, stores the worktree path and branch metadata on the session record, and points runtime execution at that isolated checkout instead. Clients can inspect the current recoverable session state, including provider, workspace, timestamps, current state, accumulated logs, output, `executionPath`, and optional `worktree` metadata, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog without destroying the active session state.
 
 ### Privileged Action Approvals
 
