@@ -182,7 +182,9 @@
         "Users can promote a detected port into a managed forward",
         "Detected ports are not exposed externally until a user forwards them"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Extended packages/ports/src/index.ts with a distinct detected-port model plus protocol/label suggestion helpers for common development services, then updated apps/runtime/src/index.ts with listening-port detection helpers that normalize runtime observations into session/workspace-associated detected ports. Updated apps/server/src/index.ts to persist detected ports, expose list/inspect/report/promote endpoints at /v1/detected-ports, include detected ports in control-plane snapshots, and only create externally managed URLs when a detected port is explicitly promoted into a forwarded port. Updated apps/web/src/index.ts and apps/mobile/src/index.ts so client dashboards fetch detected ports and can promote them into managed forwards. Added .agents/ralph/tests/us-013-auto-detect-common-development-ports.test.ts coverage for runtime detection, suggested labels, client visibility, promotion into a managed forward, and the rule that detected ports are not externally exposed before forwarding, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-014",

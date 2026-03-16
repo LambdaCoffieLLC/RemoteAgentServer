@@ -4,7 +4,7 @@ import { hostname as getHostname } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import type { Readable } from 'node:stream'
 import { promisify } from 'node:util'
-import { createForwardedPort } from '@remote-agent/ports'
+import { createDetectedPort, createForwardedPort, type DetectedPort } from '@remote-agent/ports'
 import {
   createManifest,
   type HostId,
@@ -142,6 +142,27 @@ export interface RuntimeStatusReportOptions {
 export interface RuntimeControlPlaneResponse {
   statusCode: number
   host: RuntimeControlPlaneHost
+}
+
+export interface RuntimeListeningPortObservation {
+  localPort: number
+  targetPort?: number
+  protocol?: DetectedPort['protocol']
+  command?: string
+  processId?: number
+  hostId: HostId
+  workspaceId?: WorkspaceId
+  sessionId?: SessionId
+  detectedAt?: IsoTimestamp
+  lastSeenAt?: IsoTimestamp
+}
+
+export interface DetectRuntimePortsOptions {
+  hostId: HostId
+  observations?: RuntimeListeningPortObservation[]
+  commandOutput?: string
+  clock?: () => IsoTimestamp
+  execFileImpl?: typeof execFile
 }
 
 export interface LocalRuntimeOptions {
@@ -297,6 +318,82 @@ export function describeRuntimeApp() {
       label: 'Runtime health endpoint',
     }),
   }
+}
+
+export async function detectRuntimePorts(options: DetectRuntimePortsOptions): Promise<DetectedPort[]> {
+  const clock = options.clock ?? (() => new Date().toISOString())
+  const observedAt = clock()
+  const observations =
+    options.observations ??
+    parseListeningPortCommandOutput(
+      options.commandOutput ??
+        (
+          await (options.execFileImpl ?? execFile)('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], {
+            encoding: 'utf8',
+          })
+        ).stdout,
+      options.hostId,
+      observedAt,
+    )
+
+  return observations.map((observation, index) =>
+    createDetectedPort({
+      id: toDetectedPortId(observation, index),
+      hostId: observation.hostId,
+      workspaceId: observation.workspaceId,
+      sessionId: observation.sessionId,
+      localPort: observation.localPort,
+      targetPort: observation.targetPort,
+      protocol: observation.protocol,
+      command: observation.command,
+      processId: observation.processId,
+      detectedAt: observation.detectedAt ?? observedAt,
+      lastSeenAt: observation.lastSeenAt ?? observation.detectedAt ?? observedAt,
+    }),
+  )
+}
+
+export function parseListeningPortCommandOutput(
+  output: string,
+  hostId: HostId,
+  detectedAt: IsoTimestamp,
+): RuntimeListeningPortObservation[] {
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('COMMAND'))
+    .flatMap((line) => {
+      const match = line.match(/^(\S+)\s+(\d+)\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+TCP\s+[^:]+:(\d+)\s+\(LISTEN\)$/)
+
+      if (!match) {
+        return []
+      }
+
+      const [, command, processId, localPort] = match
+      return [
+        {
+          hostId,
+          localPort: Number(localPort),
+          command,
+          processId: Number(processId),
+          detectedAt,
+          lastSeenAt: detectedAt,
+        } satisfies RuntimeListeningPortObservation,
+      ]
+    })
+}
+
+function toDetectedPortId(observation: RuntimeListeningPortObservation, index: number): DetectedPort['id'] {
+  const workspaceToken = observation.workspaceId?.replace(/^workspace_/, '')
+  const sessionToken = observation.sessionId?.replace(/^session_/, '')
+  const commandToken = observation.command
+    ?.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24)
+  const scopeToken = sessionToken ?? workspaceToken ?? commandToken ?? `port-${observation.localPort}`
+
+  return `detected_port_${scopeToken}_${observation.localPort}_${index + 1}` as DetectedPort['id']
 }
 
 export class RuntimeSessionManager {

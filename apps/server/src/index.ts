@@ -6,7 +6,14 @@ import { type AddressInfo } from 'node:net'
 import { basename, dirname, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createAuthorizationPolicy, type AuthScope, type AuthenticatedActor } from '@remote-agent/auth'
-import { createForwardedPort, hasForwardedPortExpired, isForwardedPortActive, type ForwardedPort } from '@remote-agent/ports'
+import {
+  createDetectedPort,
+  createForwardedPort,
+  hasForwardedPortExpired,
+  isForwardedPortActive,
+  type DetectedPort,
+  type ForwardedPort,
+} from '@remote-agent/ports'
 import {
   createManifest,
   type HostId,
@@ -137,6 +144,7 @@ export interface ControlPlaneState {
   approvals: ApprovalRecord[]
   auditLog: AuditLogRecord[]
   ports: ForwardedPort[]
+  detectedPorts: DetectedPort[]
   notifications: NotificationRecord[]
 }
 
@@ -286,6 +294,37 @@ interface UpdateForwardedPortInput {
   action: 'open' | 'close' | 'expire'
 }
 
+interface ReportDetectedPortInput {
+  id: DetectedPort['id']
+  hostId: HostId
+  workspaceId?: WorkspaceId
+  sessionId?: SessionId
+  localPort: number
+  targetPort?: number
+  protocol?: DetectedPort['protocol']
+  label?: string
+  suggestedLabel?: string
+  command?: string
+  processId?: number
+  detectedAt?: IsoTimestamp
+  lastSeenAt?: IsoTimestamp
+}
+
+interface ListDetectedPortsInput {
+  hostId?: HostId
+  workspaceId?: WorkspaceId
+  sessionId?: SessionId
+  forwardedOnly?: boolean
+}
+
+interface PromoteDetectedPortInput {
+  forwardedPortId: ForwardedPort['id']
+  visibility: ForwardedPort['visibility']
+  protocol?: ForwardedPort['protocol']
+  label?: string
+  expiresAt?: IsoTimestamp
+}
+
 const defaultActors: Record<string, AuthenticatedActor> = {
   'control-plane-operator': {
     id: 'user_operator',
@@ -321,6 +360,7 @@ const emptyState: ControlPlaneState = {
   approvals: [],
   auditLog: [],
   ports: [],
+  detectedPorts: [],
   notifications: [],
 }
 
@@ -371,6 +411,16 @@ export function describeServerApp() {
       targetPort: 3000,
       visibility: 'private',
       label: 'Server preview',
+    }),
+    detectedPort: createDetectedPort({
+      id: 'detected_port_server_preview',
+      hostId,
+      workspaceId,
+      sessionId,
+      localPort: 3000,
+      detectedAt: '2026-03-16T00:00:00.000Z',
+      lastSeenAt: '2026-03-16T00:00:00.000Z',
+      command: 'vite --host',
     }),
     provider,
   }
@@ -1002,6 +1052,142 @@ export class ControlPlaneServer {
     return port
   }
 
+  async listDetectedPorts(input: ListDetectedPortsInput = {}) {
+    if (input.hostId) {
+      this.assertHostExists(input.hostId)
+    }
+
+    if (input.workspaceId) {
+      this.assertWorkspaceExists(input.workspaceId)
+    }
+
+    if (input.sessionId) {
+      this.getSession(input.sessionId)
+    }
+
+    return this.state.detectedPorts.filter((port) => {
+      if (input.hostId && port.hostId !== input.hostId) {
+        return false
+      }
+
+      if (input.workspaceId && port.workspaceId !== input.workspaceId) {
+        return false
+      }
+
+      if (input.sessionId && port.sessionId !== input.sessionId) {
+        return false
+      }
+
+      if (input.forwardedOnly && !port.forwardedPortId) {
+        return false
+      }
+
+      return true
+    })
+  }
+
+  async inspectDetectedPort(id: DetectedPort['id']) {
+    return this.getDetectedPort(id)
+  }
+
+  async reportDetectedPort(input: ReportDetectedPortInput) {
+    this.assertHostExists(input.hostId)
+    const workspace = input.workspaceId ? this.getWorkspace(input.workspaceId) : undefined
+    const session = input.sessionId ? this.getSession(input.sessionId) : undefined
+
+    if (workspace && workspace.hostId !== input.hostId) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_detected_port_workspace',
+        `Workspace ${workspace.id} is registered on host ${workspace.hostId}, not ${input.hostId}.`,
+      )
+    }
+
+    if (session && session.hostId !== input.hostId) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_detected_port_session',
+        `Session ${session.id} is registered on host ${session.hostId}, not ${input.hostId}.`,
+      )
+    }
+
+    if (workspace && session && session.workspaceId !== workspace.id) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_detected_port_scope',
+        `Session ${session.id} does not belong to workspace ${workspace.id}.`,
+      )
+    }
+
+    if (!isValidPortNumber(input.localPort) || (input.targetPort !== undefined && !isValidPortNumber(input.targetPort))) {
+      throw new ControlPlaneRequestError(400, 'invalid_detected_port_number', 'Detected ports require localPort and targetPort between 1 and 65535.')
+    }
+
+    const detectedPort = createDetectedPort({
+      id: input.id,
+      hostId: input.hostId,
+      workspaceId: workspace?.id,
+      sessionId: session?.id,
+      localPort: input.localPort,
+      targetPort: input.targetPort,
+      protocol: input.protocol,
+      label: input.label,
+      suggestedLabel: input.suggestedLabel,
+      command: input.command,
+      processId: input.processId,
+      detectedAt: input.detectedAt ?? this.clock(),
+      lastSeenAt: input.lastSeenAt ?? this.clock(),
+      forwardedPortId: this.state.detectedPorts.find((port) => port.id === input.id)?.forwardedPortId,
+    })
+
+    this.state.detectedPorts = upsertRecord(this.state.detectedPorts, detectedPort)
+    await this.persistState()
+    this.publishEvent('detected-port.upserted', { detectedPort })
+    return detectedPort
+  }
+
+  async promoteDetectedPort(id: DetectedPort['id'], input: PromoteDetectedPortInput) {
+    const detectedPort = this.getDetectedPort(id)
+
+    if (detectedPort.forwardedPortId) {
+      return {
+        detectedPort,
+        forwardedPort: this.getForwardedPort(detectedPort.forwardedPortId),
+      }
+    }
+
+    const forwardedPort = await this.createForwardedPort({
+      id: input.forwardedPortId,
+      hostId: detectedPort.hostId,
+      workspaceId: detectedPort.workspaceId,
+      sessionId: detectedPort.sessionId,
+      localPort: detectedPort.localPort,
+      targetPort: detectedPort.targetPort,
+      protocol: input.protocol ?? detectedPort.protocol,
+      visibility: input.visibility,
+      label: input.label ?? detectedPort.label,
+      expiresAt: input.expiresAt,
+    })
+
+    const promotedDetectedPort = createDetectedPort({
+      ...detectedPort,
+      forwardedPortId: forwardedPort.id,
+      lastSeenAt: this.clock(),
+    })
+
+    this.state.detectedPorts = upsertRecord(this.state.detectedPorts, promotedDetectedPort)
+    await this.persistState()
+    this.publishEvent('detected-port.promoted', {
+      detectedPort: promotedDetectedPort,
+      forwardedPort,
+    })
+
+    return {
+      detectedPort: promotedDetectedPort,
+      forwardedPort,
+    }
+  }
+
   async listNotifications() {
     return [...this.state.notifications]
   }
@@ -1438,6 +1624,54 @@ export class ControlPlaneServer {
         return
       }
 
+      if (request.method === 'GET' && pathSegments[0] === 'v1' && pathSegments[1] === 'detected-ports' && pathSegments[2]) {
+        if (!this.authorizeRequest(request, response, 'ports:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.inspectDetectedPort(pathSegments[2] as DetectedPort['id']) })
+        return
+      }
+
+      if (
+        request.method === 'POST' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'detected-ports' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'forward'
+      ) {
+        if (!this.authorizeRequest(request, response, 'ports:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<PromoteDetectedPortInput>
+
+        if (!input.forwardedPortId || !input.visibility) {
+          this.writeError(
+            response,
+            400,
+            'invalid_detected_port_promotion',
+            'Detected port promotion requires forwardedPortId and visibility.',
+          )
+          return
+        }
+
+        if (!['private', 'shared'].includes(input.visibility)) {
+          this.writeError(response, 400, 'invalid_port_visibility', 'Forwarded ports must use private or shared visibility.')
+          return
+        }
+
+        if (input.protocol && !['tcp', 'http', 'https'].includes(input.protocol)) {
+          this.writeError(response, 400, 'invalid_port_protocol', 'Forwarded ports must use tcp, http, or https protocols.')
+          return
+        }
+
+        this.writeJson(response, 201, {
+          data: await this.promoteDetectedPort(pathSegments[2] as DetectedPort['id'], input as PromoteDetectedPortInput),
+        })
+        return
+      }
+
       if (
         request.method === 'GET' &&
         pathSegments[0] === 'v1' &&
@@ -1506,6 +1740,30 @@ export class ControlPlaneServer {
         return
       }
 
+      if (request.method === 'GET' && url.pathname === '/v1/detected-ports') {
+        if (!this.authorizeRequest(request, response, 'ports:read')) {
+          return
+        }
+
+        const forwardedOnlyRaw = url.searchParams.get('forwardedOnly')
+        const forwardedOnly = forwardedOnlyRaw === null ? false : parseBooleanQuery(forwardedOnlyRaw)
+
+        if (forwardedOnlyRaw !== null && forwardedOnly === undefined) {
+          this.writeError(response, 400, 'invalid_detected_port_filter', 'The forwardedOnly filter must be true or false.')
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.listDetectedPorts({
+            hostId: (url.searchParams.get('hostId') as HostId | null) ?? undefined,
+            workspaceId: (url.searchParams.get('workspaceId') as WorkspaceId | null) ?? undefined,
+            sessionId: (url.searchParams.get('sessionId') as SessionId | null) ?? undefined,
+            forwardedOnly,
+          }),
+        })
+        return
+      }
+
       if (request.method === 'POST' && (url.pathname === '/v1/ports' || url.pathname === '/v1/forwarded-ports')) {
         if (!this.authorizeRequest(request, response, 'ports:write')) {
           return
@@ -1541,6 +1799,32 @@ export class ControlPlaneServer {
         }
 
         this.writeJson(response, 201, { data: await this.createForwardedPort(input as CreateForwardedPortInput) })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/detected-ports') {
+        if (!this.authorizeRequest(request, response, 'ports:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<ReportDetectedPortInput>
+
+        if (!input.id || !input.hostId || input.localPort === undefined) {
+          this.writeError(
+            response,
+            400,
+            'invalid_detected_port',
+            'Detected port reporting requires id, hostId, and localPort.',
+          )
+          return
+        }
+
+        if (input.protocol && !['tcp', 'http', 'https'].includes(input.protocol)) {
+          this.writeError(response, 400, 'invalid_port_protocol', 'Forwarded ports must use tcp, http, or https protocols.')
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.reportDetectedPort(input as ReportDetectedPortInput) })
         return
       }
 
@@ -1726,6 +2010,16 @@ export class ControlPlaneServer {
     }
 
     return port
+  }
+
+  private getDetectedPort(id: DetectedPort['id']) {
+    const detectedPort = this.state.detectedPorts.find((entry) => entry.id === id)
+
+    if (!detectedPort) {
+      throw new ControlPlaneRequestError(404, 'detected_port_not_found', `Detected port ${id} is not registered.`)
+    }
+
+    return detectedPort
   }
 
   private async expireForwardedPorts() {
@@ -1928,6 +2222,7 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
       actor: { ...entry.actor },
     })),
     ports: (seedState?.ports ?? emptyState.ports).map((port) => createForwardedPort(port)),
+    detectedPorts: (seedState?.detectedPorts ?? emptyState.detectedPorts).map((port) => createDetectedPort(port)),
     notifications: [...(seedState?.notifications ?? emptyState.notifications)],
   }
 }
@@ -1948,6 +2243,7 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
       actor: { ...entry.actor },
     })),
     ports: state.ports.map((port) => createForwardedPort(port)),
+    detectedPorts: state.detectedPorts.map((port) => createDetectedPort(port)),
     notifications: state.notifications.map((notification) => ({ ...notification })),
   }
 }

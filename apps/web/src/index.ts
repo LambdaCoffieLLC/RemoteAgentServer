@@ -1,5 +1,5 @@
 import type { AuthenticatedActor } from '@remote-agent/auth'
-import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
+import { createDetectedPort, createForwardedPort, type DetectedPort, type ForwardedPort } from '@remote-agent/ports'
 import { createManifest, type HostId, type IsoTimestamp, type ProtocolEnvelope, type SessionId, type WorkspaceId } from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
 import {
@@ -87,6 +87,7 @@ export interface WebClientDashboard {
   sessions: SessionSummary[]
   approvals: WebClientApprovalRecord[]
   ports: ForwardedPort[]
+  detectedPorts: DetectedPort[]
 }
 
 export interface WebControlPlaneEvent<TType extends string = string, TPayload = unknown>
@@ -112,6 +113,14 @@ export interface SessionDiffQuery extends SessionChangeQuery {
 
 export interface SessionRecoveryQuery {
   limit?: number
+}
+
+export interface PromoteDetectedPortOptions {
+  forwardedPortId: ForwardedPort['id']
+  visibility: ForwardedPort['visibility']
+  protocol?: ForwardedPort['protocol']
+  label?: string
+  expiresAt?: IsoTimestamp
 }
 
 interface JsonSuccessResponse<TData> {
@@ -147,6 +156,10 @@ export interface WebControlPlaneClient {
   recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
   listSessionChanges: (sessionId: SessionId, query?: SessionChangeQuery) => Promise<SessionChangeList>
   readSessionDiff: (sessionId: SessionId, query?: SessionDiffQuery) => Promise<SessionDiff>
+  promoteDetectedPort: (
+    detectedPortId: DetectedPort['id'],
+    options: PromoteDetectedPortOptions,
+  ) => Promise<{ detectedPort: DetectedPort; forwardedPort: ForwardedPort }>
   decideApproval: (
     approvalId: WebClientApprovalId,
     status: Extract<WebClientApprovalStatus, 'approved' | 'rejected'>,
@@ -230,12 +243,13 @@ export function createWebControlPlaneClient(options: WebControlPlaneClientOption
 
   return {
     signIn: async () => {
-      const [hosts, workspaces, sessions, approvals, ports] = await Promise.all([
+      const [hosts, workspaces, sessions, approvals, ports, detectedPorts] = await Promise.all([
         request<WebClientHostRecord[]>('/v1/hosts'),
         request<WebClientWorkspaceRecord[]>('/v1/workspaces'),
         request<SessionSummary[]>('/v1/sessions'),
         request<WebClientApprovalRecord[]>('/v1/approvals'),
         request<ForwardedPort[]>('/v1/ports'),
+        request<DetectedPort[]>('/v1/detected-ports'),
       ])
 
       return {
@@ -243,7 +257,8 @@ export function createWebControlPlaneClient(options: WebControlPlaneClientOption
         workspaces: workspaces.data,
         sessions: sessions.data.map((session) => createSessionSummary(session)),
         approvals: approvals.data,
-        ports: ports.data,
+        ports: ports.data.map((port) => createForwardedPort(port)),
+        detectedPorts: detectedPorts.data.map((port) => createDetectedPort(port)),
       }
     },
     listSessionEvents: async (sessionId) => {
@@ -278,6 +293,23 @@ export function createWebControlPlaneClient(options: WebControlPlaneClientOption
         }),
       )
       return response.data
+    },
+    promoteDetectedPort: async (detectedPortId, promotion) => {
+      const response = await request<{ detectedPort: DetectedPort; forwardedPort: ForwardedPort }>(
+        `/v1/detected-ports/${detectedPortId}/forward`,
+        {
+          method: 'POST',
+          body: JSON.stringify(promotion),
+          headers: {
+            'content-type': 'application/json',
+          },
+        },
+      )
+
+      return {
+        detectedPort: createDetectedPort(response.data.detectedPort),
+        forwardedPort: createForwardedPort(response.data.forwardedPort),
+      }
     },
     decideApproval: async (approvalId, status) => {
       const response = await request<WebClientApprovalRecord>(`/v1/approvals/${approvalId}`, {

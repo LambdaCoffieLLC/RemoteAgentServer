@@ -1,5 +1,5 @@
 import type { AuthenticatedActor } from '@remote-agent/auth'
-import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
+import { createDetectedPort, createForwardedPort, type DetectedPort, type ForwardedPort } from '@remote-agent/ports'
 import {
   createManifest,
   type HostId,
@@ -92,6 +92,7 @@ export interface MobileClientDashboard {
   sessions: SessionSummary[]
   approvals: MobileClientApprovalRecord[]
   ports: ForwardedPort[]
+  detectedPorts: DetectedPort[]
 }
 
 export interface MobileControlPlaneEvent<TType extends string = string, TPayload = unknown>
@@ -118,6 +119,14 @@ export interface SessionRecoveryQuery {
   limit?: number
 }
 
+export interface PromoteDetectedPortOptions {
+  forwardedPortId: ForwardedPort['id']
+  visibility: ForwardedPort['visibility']
+  protocol?: ForwardedPort['protocol']
+  label?: string
+  expiresAt?: IsoTimestamp
+}
+
 /* eslint-disable no-unused-vars */
 export interface MobilePreviewOpeners {
   openInAppBrowser(url: string): Promise<unknown>
@@ -142,6 +151,7 @@ interface ControlPlaneSnapshotPayload {
   sessions?: SessionSummary[]
   approvals?: MobileClientApprovalRecord[]
   ports?: ForwardedPort[]
+  detectedPorts?: DetectedPort[]
 }
 
 /* eslint-disable no-unused-vars */
@@ -149,6 +159,10 @@ export interface MobileControlPlaneClient {
   signIn: () => Promise<MobileClientDashboard>
   listSessionEvents: (sessionId: SessionId) => Promise<SessionEvent[]>
   recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
+  promoteDetectedPort: (
+    detectedPortId: DetectedPort['id'],
+    options: PromoteDetectedPortOptions,
+  ) => Promise<{ detectedPort: DetectedPort; forwardedPort: ForwardedPort }>
   decideApproval: (
     approvalId: MobileApprovalId,
     status: Extract<MobileApprovalStatus, 'approved' | 'rejected'>,
@@ -254,12 +268,13 @@ export function createMobileControlPlaneClient(options: MobileControlPlaneClient
 
   return {
     signIn: async () => {
-      const [hosts, workspaces, sessions, approvals, ports] = await Promise.all([
+      const [hosts, workspaces, sessions, approvals, ports, detectedPorts] = await Promise.all([
         request<MobileClientHostRecord[]>('/v1/hosts'),
         request<MobileClientWorkspaceRecord[]>('/v1/workspaces'),
         request<SessionSummary[]>('/v1/sessions'),
         request<MobileClientApprovalRecord[]>('/v1/approvals'),
         request<ForwardedPort[]>('/v1/ports'),
+        request<DetectedPort[]>('/v1/detected-ports'),
       ])
 
       return {
@@ -268,6 +283,7 @@ export function createMobileControlPlaneClient(options: MobileControlPlaneClient
         sessions: cloneSessions(sessions.data),
         approvals: cloneApprovals(approvals.data),
         ports: clonePorts(ports.data),
+        detectedPorts: cloneDetectedPorts(detectedPorts.data),
       }
     },
     listSessionEvents: async (sessionIdToRead) => {
@@ -281,6 +297,23 @@ export function createMobileControlPlaneClient(options: MobileControlPlaneClient
         }),
       )
       return createSessionRecovery(response.data)
+    },
+    promoteDetectedPort: async (detectedPortId, promotion) => {
+      const response = await request<{ detectedPort: DetectedPort; forwardedPort: ForwardedPort }>(
+        `/v1/detected-ports/${detectedPortId}/forward`,
+        {
+          method: 'POST',
+          body: JSON.stringify(promotion),
+          headers: {
+            'content-type': 'application/json',
+          },
+        },
+      )
+
+      return {
+        detectedPort: createDetectedPort(response.data.detectedPort),
+        forwardedPort: createForwardedPort(response.data.forwardedPort),
+      }
     },
     decideApproval: async (approvalId, status) => {
       const response = await request<MobileClientApprovalRecord>(`/v1/approvals/${approvalId}`, {
@@ -425,6 +458,36 @@ export function applyMobileControlPlaneEvent(
     return {
       ...current,
       ports: upsertById(current.ports, createForwardedPort(port)),
+    }
+  }
+
+  if (event.type === 'detected-port.upserted') {
+    const detectedPort = (event.payload as { detectedPort?: DetectedPort }).detectedPort
+
+    if (!detectedPort) {
+      return current
+    }
+
+    return {
+      ...current,
+      detectedPorts: upsertById(current.detectedPorts, createDetectedPort(detectedPort)),
+    }
+  }
+
+  if (event.type === 'detected-port.promoted') {
+    const { detectedPort, forwardedPort } = event.payload as {
+      detectedPort?: DetectedPort
+      forwardedPort?: ForwardedPort
+    }
+
+    if (!detectedPort || !forwardedPort) {
+      return current
+    }
+
+    return {
+      ...current,
+      detectedPorts: upsertById(current.detectedPorts, createDetectedPort(detectedPort)),
+      ports: upsertById(current.ports, createForwardedPort(forwardedPort)),
     }
   }
 
@@ -580,6 +643,7 @@ function toMobileDashboard(payload: ControlPlaneSnapshotPayload): MobileClientDa
     sessions: cloneSessions(payload.sessions ?? []),
     approvals: cloneApprovals(payload.approvals ?? []),
     ports: clonePorts(payload.ports ?? []),
+    detectedPorts: cloneDetectedPorts(payload.detectedPorts ?? []),
   }
 }
 
@@ -615,6 +679,10 @@ function cloneApproval(approval: MobileClientApprovalRecord) {
 
 function clonePorts(ports: ForwardedPort[]) {
   return ports.map((port) => createForwardedPort(port))
+}
+
+function cloneDetectedPorts(ports: DetectedPort[]) {
+  return ports.map((port) => createDetectedPort(port))
 }
 
 function upsertById<TRecord extends { id: string }>(records: TRecord[], nextRecord: TRecord) {
