@@ -27,6 +27,27 @@ curl -sS \
   http://127.0.0.1:4318/api/sessions
 ```
 
+## Claude Code
+
+- Provider id: `claude-code`
+- Current setup: no external CLI install is required for the repo-owned MVP flow
+- Current behavior: the scripted adapter emits repository-context and planning output through the shared runtime session manager
+- Production status: MVP contract coverage only; real upstream Claude Code credential handling and process integration are still incomplete
+
+## Codex
+
+- Provider id: `codex`
+- Current setup: no external CLI install is required for the repo-owned MVP flow
+- Current behavior: the scripted adapter emits workspace inspection and patch-application output through the shared runtime session manager
+- Production status: MVP contract coverage only; real upstream Codex credential handling and process integration are still incomplete
+
+## OpenCode
+
+- Provider id: `opencode`
+- Current setup: no external CLI install is required for the repo-owned MVP flow
+- Current behavior: the scripted adapter emits indexing and patch-generation output through the shared runtime session manager
+- Production status: MVP contract coverage only; real upstream OpenCode credential handling and process integration are still incomplete
+
 ## What Each Provider Emits In The MVP
 
 - `claude-code`: scripted repository-context and planning output
@@ -34,6 +55,12 @@ curl -sS \
 - `opencode`: scripted indexing and patch-generation output
 
 The server and clients treat those providers through the same shared contract, so the operator workflow is the same regardless of provider choice.
+
+## Setup Expectations
+
+- Choose the provider name in the session payload or client UI. The server and clients reuse the same shared provider contract.
+- The current production-ready story is the common adapter interface and the single-user operator workflow, not a hardened upstream provider integration.
+- If you need real provider credentials, process supervision, or provider-specific secret storage, treat that as future work beyond the current MVP.
 
 ## Limitations
 
@@ -44,5 +71,6 @@ The server and clients treat those providers through the same shared contract, s
 ## Related Docs
 
 - [Root README](../README.md)
+- [Self-hosting and deployment](self-hosting.md)
 - [Architecture overview](architecture.md)
 - [Security expectations](security.md)

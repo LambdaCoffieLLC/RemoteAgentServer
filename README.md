@@ -11,6 +11,32 @@ The current MVP is runnable today for the control plane plus three operator clie
 - `packages/runtime`: runtime contract, Linux install helper, enrollment CLI, and provider session manager
 - `packages/auth`, `packages/protocol`, `packages/sessions`, `packages/ports`, `packages/providers`, `packages/ui`: shared domain packages consumed by the apps
 
+## Readiness Status
+
+RemoteAgentServer is usable today, but not every surface is at the same maturity level.
+
+### Production-Ready For A Trusted Single-User Deployment
+
+- the pnpm monorepo workflow: install, build, lint, typecheck, test, and verify
+- the Node.js control plane with configurable operator and bootstrap tokens plus JSON persistence
+- Linux runtime install and enrollment for a trusted self-hosted host
+- the current web, mobile, and desktop operator clients for one operator using bearer-token auth on a trusted network
+- workspace registration, session control, approvals, audit log inspection, diff review, and managed port forwarding
+
+### MVP But Not Yet Hardened For Broader Production Use
+
+- the built-in `claude-code`, `codex`, and `opencode` provider adapters are scripted contract adapters used by the runtime and test suite
+- browser notifications, local attached-runtime development mode, and detected-port promotion flows are implemented and runnable, but still scoped to the single-user MVP
+- the default persistence layer is one JSON file, which is acceptable for restart recovery in the MVP but is not a high-scale deployment story
+
+### Incomplete Or Intentionally Out Of Scope Today
+
+- multi-user auth, roles, and tenant isolation
+- hardened secret distribution, automated token rotation, and internet-exposed security hardening
+- first-party service-manager packaging such as systemd units, container images, or orchestration manifests
+- real upstream provider CLI or API integrations for Claude Code, Codex, and OpenCode credentials and lifecycle management
+- high-availability deployment, database-backed persistence, and horizontal scaling
+
 ## Quickstart
 
 ### Prerequisites
@@ -117,6 +143,69 @@ pnpm verify
 ```
 
 `pnpm verify` is the full local and CI verification flow. CI should run `pnpm install --frozen-lockfile` and then `pnpm verify` via [.github/workflows/verify.yml](.github/workflows/verify.yml).
+
+## Self-Hosting Deployment
+
+RemoteAgentServer is designed for one operator running the control plane in a trusted environment, with runtimes and clients connecting back to that control plane.
+
+### Control Plane Deployment
+
+For a local or server deployment, build once and then start the server with explicit tokens:
+
+```bash
+pnpm install
+pnpm --filter @remote-agent-server/server build
+
+REMOTE_AGENT_SERVER_HOST=127.0.0.1 \
+REMOTE_AGENT_SERVER_PORT=4318 \
+REMOTE_AGENT_SERVER_DATA_FILE=/srv/remote-agent-server/control-plane.json \
+REMOTE_AGENT_SERVER_OPERATOR_TOKENS=replace-with-operator-token \
+REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=replace-with-bootstrap-token \
+pnpm --filter @remote-agent-server/server start
+```
+
+The control plane is production-ready for a trusted single-user deployment when you keep it on a trusted network or behind your own reverse proxy and TLS termination. It is not documented here as an internet-exposed multi-user service.
+
+### Runtime Install And Enrollment
+
+Install the runtime on each Linux host from the same repo checkout:
+
+```bash
+pnpm --filter @remote-agent-server/runtime build
+
+./packages/runtime/scripts/install-linux-runtime.sh \
+  --prefix "$HOME/.remote-agent-runtime" \
+  --server-url "https://your-control-plane.example.com" \
+  --bootstrap-token "replace-with-bootstrap-token" \
+  --host-id "devbox-1" \
+  --host-name "devbox"
+
+$HOME/.remote-agent-runtime/bin/remote-agent-runtime-enroll
+$HOME/.remote-agent-runtime/bin/remote-agent-runtime-status
+```
+
+See [docs/runtime-install.md](docs/runtime-install.md) for the full Linux install flow and [docs/self-hosting.md](docs/self-hosting.md) for deployment guidance.
+
+## Client Setup
+
+The current operator clients all connect with the same control-plane base URL and operator bearer token.
+
+- Web: run `pnpm --filter @remote-agent-server/web dev`, then sign in with the control-plane URL and operator token.
+- Mobile: run `pnpm --filter @remote-agent-server/mobile start`; when using a physical device, replace `127.0.0.1` with a reachable LAN or reverse-proxied address.
+- Desktop: run `pnpm --filter @remote-agent-server/desktop start`; the app stores the URL and token in the desktop app data directory with Electron `safeStorage` when available.
+
+The web client stores its connection settings in browser storage for this single-user setup. The mobile client stores them with Expo SecureStore. None of the clients are positioned as multi-user or enterprise secret-management surfaces yet.
+
+## Port Forwarding, Auth, And Security Boundaries
+
+- Control-plane APIs require `Authorization: Bearer <operator-token>` except for `GET /health`.
+- Runtime enrollment requires `x-bootstrap-token` and should use a different secret than operator access.
+- Detected ports are not externally reachable until an operator promotes them into a managed forward.
+- Shared forwarded ports are reachable by anyone who has the managed URL.
+- Private forwarded ports still require the operator bearer token when requested through `/ports/<port-id>`.
+- The control plane binds to `127.0.0.1` by default. Exposing it beyond the local machine is an operator choice and should sit behind TLS and your own network boundary.
+
+Use [docs/security.md](docs/security.md) for the full auth expectations, port-forwarding behavior, and security boundaries, and use [docs/provider-setup.md](docs/provider-setup.md) for provider-specific setup status.
 
 ## MVP Smoke Test
 
@@ -228,6 +317,7 @@ If you are resuming an existing attempt instead of creating a new one, leave `pr
 
 ## Deeper Docs
 
+- [Self-hosting and deployment](docs/self-hosting.md)
 - [Runtime install guide](docs/runtime-install.md)
 - [Architecture overview](docs/architecture.md)
 - [Provider setup](docs/provider-setup.md)

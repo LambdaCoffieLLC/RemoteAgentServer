@@ -8,7 +8,7 @@ RemoteAgentServer is organized as a pnpm TypeScript monorepo. The product is int
 - `packages/runtime`: the runtime contract and session manager. It launches provider adapters, emits logs and output, and contains the Linux installer and status CLI.
 - `apps/web`: browser operator client for hosts, workspaces, sessions, approvals, diffs, and previews.
 - `apps/mobile`: Expo operator client for the same control-plane workflow on mobile devices.
-- `apps/desktop`: shared-package consumer scaffold; a full desktop operator surface is still pending.
+- `apps/desktop`: Electron operator client for the same control-plane workflow on desktop, including stored connection settings, local and remote workspace switching, approvals, and previews.
 
 ## Shared Packages
 
@@ -48,6 +48,7 @@ The dependency direction flows inward. Apps depend on the shared packages and, w
 ## Related Docs
 
 - [Root README](../README.md)
+- [Self-hosting and deployment](self-hosting.md)
 - [Runtime install guide](runtime-install.md)
 - [Provider setup](provider-setup.md)
 - [Security expectations](security.md)

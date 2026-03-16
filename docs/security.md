@@ -2,6 +2,12 @@
 
 RemoteAgentServer is currently an MVP for a single-user, self-hosted deployment. The security model is intentionally simple and should be treated as operator-owned infrastructure, not a multi-tenant hosted service.
 
+## Deployment Trust Model
+
+- Production-ready means a trusted single-user deployment that you control end to end.
+- MVP means the current service is useful and documented, but not hardened for hostile networks or multi-tenant use.
+- Incomplete means internet-exposed hardening, role separation, managed secret distribution, and upstream provider credential flows are not delivered yet.
+
 ## Auth Boundaries
 
 - `GET /health` is public.
@@ -15,6 +21,7 @@ RemoteAgentServer is currently an MVP for a single-user, self-hosted deployment.
 - Protect that file with local filesystem permissions because it contains operational metadata.
 - The web client stores the control-plane URL and operator token in browser storage for this single-user setup.
 - The mobile client stores the same settings with Expo SecureStore.
+- The desktop client stores the same settings in the app data directory, using Electron `safeStorage` when available and a user-scoped fallback otherwise.
 
 ## Network Expectations
 
@@ -22,6 +29,13 @@ RemoteAgentServer is currently an MVP for a single-user, self-hosted deployment.
 - The web client relies on permissive CORS headers so a self-hosted operator can connect from another local origin; do not treat that as a hardened browser-security posture for an internet-exposed deployment.
 - Shared forwarded ports are intentionally reachable by anyone who has the managed URL.
 - Private forwarded ports still require the operator bearer token when requesting `/ports/<port-id>`.
+
+## Port Forwarding Boundaries
+
+- Detected ports are only local metadata until the operator explicitly opens them as managed forwards.
+- Opening a managed forward creates the URL exposed through `/ports/<port-id>`.
+- Shared visibility is appropriate only for trusted collaborators or private networks because possession of the URL is sufficient access.
+- Private visibility still depends on bearer-token auth at the control plane boundary; it does not create a separate end-to-end network tunnel auth layer.
 
 ## Operational Guidance
 
@@ -39,5 +53,6 @@ RemoteAgentServer is currently an MVP for a single-user, self-hosted deployment.
 ## Related Docs
 
 - [Root README](../README.md)
+- [Self-hosting and deployment](self-hosting.md)
 - [Runtime install guide](runtime-install.md)
 - [Provider setup](provider-setup.md)

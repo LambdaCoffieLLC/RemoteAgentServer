@@ -2,6 +2,8 @@
 
 The runtime install flow is for a Linux host that should enroll with the RemoteAgentServer control plane and then run sessions against managed repositories on that machine.
 
+This guide covers the supported Linux runtime path. For control-plane deployment and client setup, use [self-hosting and deployment](self-hosting.md).
+
 ## Prerequisites
 
 - Linux with Bash and standard coreutils
@@ -37,6 +39,8 @@ The installer writes:
 - `var/runtime-state.json` after enrollment succeeds
 
 The helper is safe to rerun. Reinstalling refreshes the managed files in place and preserves host identity when the same `--host-id` is reused.
+
+This installer is ready for trusted single-user self-hosting. First-party service-manager packaging such as systemd units or container images is still incomplete, so process supervision is currently operator-managed.
 
 ## Enroll And Verify
 
@@ -85,8 +89,18 @@ Example config file:
 }
 ```
 
+## Local Development Variant
+
+The same runtime contract can also be used on a local development machine:
+
+- use `REMOTE_AGENT_SERVER_DEVELOPMENT_MODE=true` on the control plane for an attached local runtime during development
+- or run `remote-agent-runtime enroll --host-mode local` after `pnpm build` to register the local machine through the same bootstrap-token flow
+
+Those modes share the same host, workspace, session, and provider contracts as the remote Linux install path.
+
 ## Related Docs
 
 - [Root README](../README.md)
+- [Self-hosting and deployment](self-hosting.md)
 - [Architecture overview](architecture.md)
 - [Security expectations](security.md)

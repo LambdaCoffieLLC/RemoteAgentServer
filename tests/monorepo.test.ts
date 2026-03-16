@@ -109,7 +109,11 @@ test('README is an operator and contributor entry point with linked deeper docs'
 
   for (const section of [
     'RemoteAgentServer',
+    'Readiness Status',
     'Quickstart',
+    'Self-Hosting Deployment',
+    'Client Setup',
+    'Port Forwarding, Auth, And Security Boundaries',
     'MVP Smoke Test',
     'Ralph Loop Workflow',
     'Deeper Docs',
@@ -126,6 +130,15 @@ test('README is an operator and contributor entry point with linked deeper docs'
   assert.match(readme, /pnpm --filter @remote-agent-server\/web dev/)
   assert.match(readme, /pnpm --filter @remote-agent-server\/mobile start/)
   assert.match(readme, /pnpm --filter @remote-agent-server\/desktop start/)
+  assert.match(readme, /REMOTE_AGENT_SERVER_OPERATOR_TOKENS/)
+  assert.match(readme, /REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS/)
+  assert.match(readme, /trusted single-user/i)
+  assert.match(readme, /production-ready/i)
+  assert.match(readme, /MVP/i)
+  assert.match(readme, /Incomplete/i)
+  assert.match(readme, /shared forwarded ports/i)
+  assert.match(readme, /private forwarded ports/i)
+  assert.match(readme, /detected ports/i)
   assert.match(readme, /\/api\/hosts/)
   assert.match(readme, /\/api\/workspaces/)
   assert.match(readme, /\/api\/sessions\/session-1\/changes/)
@@ -133,12 +146,14 @@ test('README is an operator and contributor entry point with linked deeper docs'
   assert.match(readme, /branchName/)
   assert.match(readme, /pnpm verify:ralph/)
   assert.match(readme, /pnpm ralph/)
+  assert.match(readme, /docs\/self-hosting\.md/)
   assert.match(readme, /docs\/runtime-install\.md/)
   assert.match(readme, /docs\/architecture\.md/)
   assert.match(readme, /docs\/provider-setup\.md/)
   assert.match(readme, /docs\/security\.md/)
 
   for (const docPath of [
+    'docs/self-hosting.md',
     'docs/runtime-install.md',
     'docs/architecture.md',
     'docs/provider-setup.md',
@@ -146,4 +161,42 @@ test('README is an operator and contributor entry point with linked deeper docs'
   ]) {
     assert.equal(existsSync(join(repoRoot, docPath)), true, `${docPath} should exist`)
   }
+})
+
+test('supporting docs cover deployment, providers, security boundaries, and readiness guidance', () => {
+  const selfHosting = readText('docs/self-hosting.md')
+  const runtimeInstall = readText('docs/runtime-install.md')
+  const providerSetup = readText('docs/provider-setup.md')
+  const security = readText('docs/security.md')
+  const architecture = readText('docs/architecture.md')
+
+  assert.match(selfHosting, /Deploy The Control Plane/)
+  assert.match(selfHosting, /REMOTE_AGENT_SERVER_DATA_FILE/)
+  assert.match(selfHosting, /reverse proxy/i)
+  assert.match(selfHosting, /TLS/i)
+  assert.match(selfHosting, /web: `pnpm --filter @remote-agent-server\/web dev`/)
+  assert.match(selfHosting, /mobile: `pnpm --filter @remote-agent-server\/mobile start`/)
+  assert.match(selfHosting, /desktop: `pnpm --filter @remote-agent-server\/desktop start`/)
+  assert.match(selfHosting, /Production-ready/i)
+  assert.match(selfHosting, /MVP/i)
+  assert.match(selfHosting, /Incomplete/i)
+
+  assert.match(runtimeInstall, /install-linux-runtime\.sh/)
+  assert.match(runtimeInstall, /safe to rerun/i)
+  assert.match(runtimeInstall, /host-mode local/)
+
+  for (const providerName of ['Claude Code', 'Codex', 'OpenCode']) {
+    assert.match(providerSetup, new RegExp(providerName))
+  }
+  assert.match(providerSetup, /scripted provider adapters/i)
+  assert.match(providerSetup, /credential handling/i)
+
+  assert.match(security, /Auth Boundaries/)
+  assert.match(security, /Port Forwarding Boundaries/)
+  assert.match(security, /shared/i)
+  assert.match(security, /private/i)
+  assert.match(security, /detected ports/i)
+
+  assert.match(architecture, /apps\/desktop/)
+  assert.doesNotMatch(architecture, /still pending/i)
 })

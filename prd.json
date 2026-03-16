@@ -320,7 +320,9 @@
         "Documentation explains port forwarding behavior, auth expectations, and security boundaries",
         "Documentation clearly distinguishes what is production-ready, what is MVP, and what is still incomplete"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Expanded the root README with a documented quickstart, explicit self-hosting deployment section, client setup, monorepo commands, port-forwarding and auth boundaries, and a readiness breakdown that distinguishes production-ready single-user surfaces from MVP and incomplete areas. Added docs/self-hosting.md plus updates to docs/runtime-install.md, docs/provider-setup.md, docs/security.md, and docs/architecture.md to cover control-plane deployment, runtime enrollment, web/mobile/desktop setup, Claude Code/Codex/OpenCode setup status, and the current security boundaries. Extended tests/monorepo.test.ts with product-owned documentation assertions for the README and deeper docs, and verified with node --import tsx --test tests/monorepo.test.ts."
     },
     {
       "id": "US-021",
