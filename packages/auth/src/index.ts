@@ -4,9 +4,14 @@ export type SubjectKind = 'user' | 'service'
 
 export type AuthScope =
   | 'hosts:read'
+  | 'hosts:write'
   | 'workspaces:read'
+  | 'workspaces:write'
   | 'sessions:read'
   | 'sessions:write'
+  | 'approvals:read'
+  | 'approvals:write'
+  | 'notifications:read'
   | 'ports:read'
   | 'ports:write'
 

@@ -1,12 +1,182 @@
-import { createAuthorizationPolicy } from '@remote-agent/auth'
-import { createForwardedPort } from '@remote-agent/ports'
-import { createManifest, type HostId, type SessionId, type WorkspaceId } from '@remote-agent/protocol'
+import { createServer as createNodeServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { type AddressInfo } from 'node:net'
+import { dirname } from 'node:path'
+import { createAuthorizationPolicy, type AuthScope, type AuthenticatedActor } from '@remote-agent/auth'
+import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
+import { createManifest, type HostId, type IsoTimestamp, type ProtocolEnvelope, type SessionId, type WorkspaceId } from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
-import { createSessionSummary } from '@remote-agent/sessions'
+import { createSessionSummary, type SessionStatus, type SessionSummary } from '@remote-agent/sessions'
 
 const hostId = 'host_control_plane' as HostId
 const workspaceId = 'workspace_server' as WorkspaceId
 const sessionId = 'session_server_bootstrap' as SessionId
+
+export type HostPlatform = 'linux' | 'macos' | 'windows'
+export type HostRuntimeStatus = 'online' | 'offline' | 'degraded'
+export type ApprovalId = `approval_${string}`
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
+export type NotificationId = `notification_${string}`
+export type NotificationCategory = 'approval-required' | 'session-status' | 'port-exposed'
+
+export interface HostRecord {
+  id: HostId
+  label: string
+  platform: HostPlatform
+  runtimeStatus: HostRuntimeStatus
+  enrolledAt: IsoTimestamp
+  lastSeenAt: IsoTimestamp
+}
+
+export interface WorkspaceRecord {
+  id: WorkspaceId
+  hostId: HostId
+  name: string
+  repositoryPath: string
+  defaultBranch: string
+  runtimeLabel: string
+}
+
+export interface ApprovalRecord {
+  id: ApprovalId
+  sessionId: SessionId
+  action: string
+  requestedBy: Pick<AuthenticatedActor, 'id' | 'displayName'>
+  requestedAt: IsoTimestamp
+  status: ApprovalStatus
+  decidedAt?: IsoTimestamp
+  decidedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
+}
+
+export interface NotificationRecord {
+  id: NotificationId
+  category: NotificationCategory
+  title: string
+  message: string
+  createdAt: IsoTimestamp
+  sessionId?: SessionId
+  approvalId?: ApprovalId
+  portId?: ForwardedPort['id']
+}
+
+export interface ControlPlaneState {
+  hosts: HostRecord[]
+  workspaces: WorkspaceRecord[]
+  sessions: SessionSummary[]
+  approvals: ApprovalRecord[]
+  ports: ForwardedPort[]
+  notifications: NotificationRecord[]
+}
+
+export interface ControlPlaneEvent<TType extends string = string, TPayload = unknown> extends ProtocolEnvelope<TType, TPayload> {
+  issuedAt: IsoTimestamp
+}
+
+export interface ControlPlaneHttpHandle {
+  controlPlane: ControlPlaneServer
+  server: HttpServer
+  origin: string
+  close: () => Promise<void>
+}
+
+export interface ControlPlaneServerOptions {
+  actors?: Record<string, AuthenticatedActor>
+  clock?: () => IsoTimestamp
+  storagePath?: string
+  seedState?: Partial<ControlPlaneState>
+}
+
+interface CreateHostInput {
+  id: HostId
+  label: string
+  platform: HostPlatform
+  runtimeStatus: HostRuntimeStatus
+  enrolledAt?: IsoTimestamp
+  lastSeenAt?: IsoTimestamp
+}
+
+interface CreateWorkspaceInput {
+  id: WorkspaceId
+  hostId: HostId
+  name: string
+  repositoryPath: string
+  defaultBranch: string
+  runtimeLabel: string
+}
+
+interface CreateSessionInput {
+  id: SessionId
+  hostId: HostId
+  workspaceId: WorkspaceId
+  provider: SessionSummary['provider']
+  requestedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
+  status?: SessionStatus
+  startedAt?: IsoTimestamp
+}
+
+interface UpdateSessionInput {
+  status: SessionStatus
+}
+
+interface CreateApprovalInput {
+  id: ApprovalId
+  sessionId: SessionId
+  action: string
+  requestedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
+  requestedAt?: IsoTimestamp
+}
+
+interface DecideApprovalInput {
+  status: Extract<ApprovalStatus, 'approved' | 'rejected'>
+  decidedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
+}
+
+interface CreateForwardedPortInput {
+  id: ForwardedPort['id']
+  hostId: HostId
+  workspaceId?: WorkspaceId
+  sessionId?: SessionId
+  localPort: number
+  targetPort: number
+  visibility: ForwardedPort['visibility']
+  label: string
+}
+
+const defaultActors: Record<string, AuthenticatedActor> = {
+  'control-plane-operator': {
+    id: 'user_operator',
+    kind: 'user',
+    displayName: 'Control Plane Operator',
+    scopes: [
+      'hosts:read',
+      'hosts:write',
+      'workspaces:read',
+      'workspaces:write',
+      'sessions:read',
+      'sessions:write',
+      'approvals:read',
+      'approvals:write',
+      'notifications:read',
+      'ports:read',
+      'ports:write',
+    ],
+  },
+  'control-plane-viewer': {
+    id: 'user_viewer',
+    kind: 'user',
+    displayName: 'Control Plane Viewer',
+    scopes: ['hosts:read', 'workspaces:read', 'sessions:read', 'approvals:read', 'notifications:read', 'ports:read'],
+  },
+}
+
+const emptyState: ControlPlaneState = {
+  hosts: [],
+  workspaces: [],
+  sessions: [],
+  approvals: [],
+  ports: [],
+  notifications: [],
+}
 
 export function describeServerApp() {
   const provider = coreProviderDescriptors.find(({ id }) => id === 'codex') ?? coreProviderDescriptors[0]
@@ -21,8 +191,15 @@ export function describeServerApp() {
     ]),
     authorization: createAuthorizationPolicy('control-plane', [
       'hosts:read',
+      'hosts:write',
+      'workspaces:read',
+      'workspaces:write',
       'sessions:read',
       'sessions:write',
+      'approvals:read',
+      'approvals:write',
+      'notifications:read',
+      'ports:read',
       'ports:write',
     ]),
     session: createSessionSummary({
@@ -49,4 +226,704 @@ export function describeServerApp() {
     }),
     provider,
   }
+}
+
+export class ControlPlaneServer {
+  readonly actors: ReadonlyMap<string, AuthenticatedActor>
+
+  private readonly clock: () => IsoTimestamp
+
+  private readonly storagePath?: string
+
+  // eslint-disable-next-line no-unused-vars
+  private readonly listeners = new Set<(...args: [ControlPlaneEvent]) => void>()
+
+  private readonly eventStreams = new Set<ServerResponse<IncomingMessage>>()
+
+  private state: ControlPlaneState
+
+  private constructor(options: ControlPlaneServerOptions = {}) {
+    this.actors = new Map(Object.entries(options.actors ?? defaultActors))
+    this.clock = options.clock ?? (() => new Date().toISOString())
+    this.storagePath = options.storagePath
+    this.state = mergeState(options.seedState)
+  }
+
+  static async create(options: ControlPlaneServerOptions = {}) {
+    const server = new ControlPlaneServer(options)
+    await server.loadState()
+    return server
+  }
+
+  snapshot(): ControlPlaneState {
+    return cloneState(this.state)
+  }
+
+  // eslint-disable-next-line no-unused-vars
+  subscribe(listener: (...args: [ControlPlaneEvent]) => void) {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  async listHosts() {
+    return [...this.state.hosts]
+  }
+
+  async upsertHost(input: CreateHostInput) {
+    const timestamp = this.clock()
+    const host: HostRecord = {
+      id: input.id,
+      label: input.label,
+      platform: input.platform,
+      runtimeStatus: input.runtimeStatus,
+      enrolledAt: input.enrolledAt ?? timestamp,
+      lastSeenAt: input.lastSeenAt ?? timestamp,
+    }
+
+    this.state.hosts = upsertRecord(this.state.hosts, host)
+    await this.persistState()
+    this.publishEvent('host.registered', { host })
+    return host
+  }
+
+  async listWorkspaces() {
+    return [...this.state.workspaces]
+  }
+
+  async upsertWorkspace(input: CreateWorkspaceInput) {
+    this.assertHostExists(input.hostId)
+
+    const workspace: WorkspaceRecord = {
+      id: input.id,
+      hostId: input.hostId,
+      name: input.name,
+      repositoryPath: input.repositoryPath,
+      defaultBranch: input.defaultBranch,
+      runtimeLabel: input.runtimeLabel,
+    }
+
+    this.state.workspaces = upsertRecord(this.state.workspaces, workspace)
+    await this.persistState()
+    this.publishEvent('workspace.registered', { workspace })
+    return workspace
+  }
+
+  async listSessions() {
+    return [...this.state.sessions]
+  }
+
+  async createSession(input: CreateSessionInput, actor?: AuthenticatedActor) {
+    this.assertHostExists(input.hostId)
+    this.assertWorkspaceExists(input.workspaceId)
+
+    const session = createSessionSummary({
+      id: input.id,
+      hostId: input.hostId,
+      workspaceId: input.workspaceId,
+      provider: input.provider,
+      requestedBy: input.requestedBy ?? pickActorIdentity(actor),
+      status: input.status ?? 'queued',
+      startedAt: input.startedAt ?? this.clock(),
+    })
+
+    this.state.sessions = upsertRecord(this.state.sessions, session)
+    await this.persistState()
+    this.publishEvent('session.upserted', { session })
+    await this.maybeCreateSessionNotification(session)
+    return session
+  }
+
+  async updateSession(id: SessionId, input: UpdateSessionInput) {
+    const current = this.getSession(id)
+    const updated = createSessionSummary({
+      ...current,
+      status: input.status,
+    })
+
+    this.state.sessions = upsertRecord(this.state.sessions, updated)
+    await this.persistState()
+    this.publishEvent('session.updated', { session: updated })
+    await this.maybeCreateSessionNotification(updated)
+    return updated
+  }
+
+  async listApprovals() {
+    return [...this.state.approvals]
+  }
+
+  async createApproval(input: CreateApprovalInput, actor?: AuthenticatedActor) {
+    this.getSession(input.sessionId)
+
+    const approval: ApprovalRecord = {
+      id: input.id,
+      sessionId: input.sessionId,
+      action: input.action,
+      requestedBy: input.requestedBy ?? pickActorIdentity(actor),
+      requestedAt: input.requestedAt ?? this.clock(),
+      status: 'pending',
+    }
+
+    this.state.approvals = upsertRecord(this.state.approvals, approval)
+    await this.persistState()
+    this.publishEvent('approval.requested', { approval })
+    await this.createNotification({
+      id: toNotificationId(input.id),
+      category: 'approval-required',
+      title: 'Approval required',
+      message: `${approval.action} requires review for ${approval.sessionId}.`,
+      sessionId: approval.sessionId,
+      approvalId: approval.id,
+    })
+    return approval
+  }
+
+  async decideApproval(id: ApprovalId, input: DecideApprovalInput, actor?: AuthenticatedActor) {
+    const current = this.getApproval(id)
+    const updated: ApprovalRecord = {
+      ...current,
+      status: input.status,
+      decidedAt: this.clock(),
+      decidedBy: input.decidedBy ?? pickActorIdentity(actor),
+    }
+
+    this.state.approvals = upsertRecord(this.state.approvals, updated)
+    await this.persistState()
+    this.publishEvent('approval.decided', { approval: updated })
+    return updated
+  }
+
+  async listPorts() {
+    return [...this.state.ports]
+  }
+
+  async createForwardedPort(input: CreateForwardedPortInput) {
+    this.assertHostExists(input.hostId)
+
+    if (input.workspaceId) {
+      this.assertWorkspaceExists(input.workspaceId)
+    }
+
+    if (input.sessionId) {
+      this.getSession(input.sessionId)
+    }
+
+    const port = createForwardedPort({
+      id: input.id,
+      hostId: input.hostId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      localPort: input.localPort,
+      targetPort: input.targetPort,
+      visibility: input.visibility,
+      label: input.label,
+    })
+
+    this.state.ports = upsertRecord(this.state.ports, port)
+    await this.persistState()
+    this.publishEvent('port.forwarded', { port })
+    await this.createNotification({
+      id: toNotificationId(port.id),
+      category: 'port-exposed',
+      title: 'Port forwarded',
+      message: `${port.label} is available on ${port.targetPort}.`,
+      sessionId: port.sessionId,
+      portId: port.id,
+    })
+    return port
+  }
+
+  async listNotifications() {
+    return [...this.state.notifications]
+  }
+
+  async handleRequest(request: IncomingMessage, response: ServerResponse<IncomingMessage>) {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    const pathSegments = url.pathname.split('/').filter(Boolean)
+
+    try {
+      if (request.method === 'GET' && url.pathname === '/v1/events') {
+        const actor = this.authorizeRequest(request, response, 'sessions:read')
+
+        if (!actor) {
+          return
+        }
+
+        this.openEventStream(response)
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/hosts') {
+        if (!this.authorizeRequest(request, response, 'hosts:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listHosts() })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/hosts') {
+        if (!this.authorizeRequest(request, response, 'hosts:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateHostInput>
+
+        if (!input.id || !input.label || !input.platform || !input.runtimeStatus) {
+          this.writeError(response, 400, 'invalid_host', 'Host registration requires id, label, platform, and runtimeStatus.')
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.upsertHost(input as CreateHostInput) })
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/workspaces') {
+        if (!this.authorizeRequest(request, response, 'workspaces:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listWorkspaces() })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/workspaces') {
+        if (!this.authorizeRequest(request, response, 'workspaces:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateWorkspaceInput>
+
+        if (!input.id || !input.hostId || !input.name || !input.repositoryPath || !input.defaultBranch || !input.runtimeLabel) {
+          this.writeError(
+            response,
+            400,
+            'invalid_workspace',
+            'Workspace registration requires id, hostId, name, repositoryPath, defaultBranch, and runtimeLabel.',
+          )
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.upsertWorkspace(input as CreateWorkspaceInput) })
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/sessions') {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listSessions() })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/sessions') {
+        const actor = this.authorizeRequest(request, response, 'sessions:write')
+
+        if (!actor) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateSessionInput>
+
+        if (!input.id || !input.hostId || !input.workspaceId || !input.provider) {
+          this.writeError(response, 400, 'invalid_session', 'Session creation requires id, hostId, workspaceId, and provider.')
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.createSession(input as CreateSessionInput, actor) })
+        return
+      }
+
+      if (request.method === 'PATCH' && pathSegments[0] === 'v1' && pathSegments[1] === 'sessions' && pathSegments[2]) {
+        if (!this.authorizeRequest(request, response, 'sessions:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<UpdateSessionInput>
+
+        if (!input.status) {
+          this.writeError(response, 400, 'invalid_session_update', 'Session updates require a status.')
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.updateSession(pathSegments[2] as SessionId, input as UpdateSessionInput) })
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/approvals') {
+        if (!this.authorizeRequest(request, response, 'approvals:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listApprovals() })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/approvals') {
+        const actor = this.authorizeRequest(request, response, 'approvals:write')
+
+        if (!actor) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateApprovalInput>
+
+        if (!input.id || !input.sessionId || !input.action) {
+          this.writeError(response, 400, 'invalid_approval', 'Approval creation requires id, sessionId, and action.')
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.createApproval(input as CreateApprovalInput, actor) })
+        return
+      }
+
+      if (request.method === 'PATCH' && pathSegments[0] === 'v1' && pathSegments[1] === 'approvals' && pathSegments[2]) {
+        const actor = this.authorizeRequest(request, response, 'approvals:write')
+
+        if (!actor) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<DecideApprovalInput>
+
+        if (!input.status || !['approved', 'rejected'].includes(input.status)) {
+          this.writeError(response, 400, 'invalid_approval_decision', 'Approval decisions must set status to approved or rejected.')
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.decideApproval(pathSegments[2] as ApprovalId, input as DecideApprovalInput, actor),
+        })
+        return
+      }
+
+      if (request.method === 'GET' && (url.pathname === '/v1/ports' || url.pathname === '/v1/forwarded-ports')) {
+        if (!this.authorizeRequest(request, response, 'ports:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listPorts() })
+        return
+      }
+
+      if (request.method === 'POST' && (url.pathname === '/v1/ports' || url.pathname === '/v1/forwarded-ports')) {
+        if (!this.authorizeRequest(request, response, 'ports:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateForwardedPortInput>
+
+        if (
+          !input.id ||
+          !input.hostId ||
+          input.localPort === undefined ||
+          input.targetPort === undefined ||
+          !input.visibility ||
+          !input.label
+        ) {
+          this.writeError(
+            response,
+            400,
+            'invalid_port',
+            'Forwarded port creation requires id, hostId, localPort, targetPort, visibility, and label.',
+          )
+          return
+        }
+
+        this.writeJson(response, 201, { data: await this.createForwardedPort(input as CreateForwardedPortInput) })
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/notifications') {
+        if (!this.authorizeRequest(request, response, 'notifications:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listNotifications() })
+        return
+      }
+
+      this.writeError(response, 404, 'not_found', 'The requested control-plane endpoint was not found.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected control-plane failure.'
+      const statusCode = error instanceof ControlPlaneRequestError ? error.statusCode : 500
+      const code = error instanceof ControlPlaneRequestError ? error.code : 'internal_error'
+      this.writeError(response, statusCode, code, message)
+    }
+  }
+
+  createHttpServer() {
+    return createNodeServer((request, response) => {
+      void this.handleRequest(request, response)
+    })
+  }
+
+  private async loadState() {
+    if (!this.storagePath) {
+      return
+    }
+
+    try {
+      const rawState = await readFile(this.storagePath, 'utf8')
+      this.state = mergeState(JSON.parse(rawState) as Partial<ControlPlaneState>)
+    } catch (error) {
+      const missingFile = error instanceof Error && 'code' in error && error.code === 'ENOENT'
+
+      if (!missingFile) {
+        throw error
+      }
+
+      await this.persistState()
+    }
+  }
+
+  private async persistState() {
+    if (!this.storagePath) {
+      return
+    }
+
+    await mkdir(dirname(this.storagePath), { recursive: true })
+    await writeFile(this.storagePath, JSON.stringify(this.state, null, 2))
+  }
+
+  private publishEvent<TType extends string, TPayload>(type: TType, payload: TPayload) {
+    const event: ControlPlaneEvent<TType, TPayload> = {
+      type,
+      payload,
+      issuedAt: this.clock(),
+    }
+
+    for (const listener of this.listeners) {
+      listener(event)
+    }
+
+    const frame = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+
+    for (const stream of this.eventStreams) {
+      stream.write(frame)
+    }
+  }
+
+  private openEventStream(response: ServerResponse<IncomingMessage>) {
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+    })
+    response.write(`event: control-plane.snapshot\ndata: ${JSON.stringify({ type: 'control-plane.snapshot', payload: this.snapshot(), issuedAt: this.clock() })}\n\n`)
+    this.eventStreams.add(response)
+
+    response.on('close', () => {
+      this.eventStreams.delete(response)
+    })
+  }
+
+  private authorizeRequest(request: IncomingMessage, response: ServerResponse<IncomingMessage>, scope: AuthScope) {
+    const authorizationHeader = request.headers.authorization
+
+    if (!authorizationHeader?.startsWith('Bearer ')) {
+      this.writeError(response, 401, 'unauthorized', 'A bearer token is required.')
+      return undefined
+    }
+
+    const token = authorizationHeader.slice('Bearer '.length)
+    const actor = this.actors.get(token)
+
+    if (!actor) {
+      this.writeError(response, 401, 'unauthorized', 'The provided bearer token is not recognized.')
+      return undefined
+    }
+
+    if (!actor.scopes.includes(scope)) {
+      this.writeError(response, 403, 'forbidden', `Missing required scope: ${scope}.`)
+      return undefined
+    }
+
+    return actor
+  }
+
+  private assertHostExists(id: HostId) {
+    if (!this.state.hosts.some((host) => host.id === id)) {
+      throw new ControlPlaneRequestError(404, 'host_not_found', `Host ${id} is not registered.`)
+    }
+  }
+
+  private assertWorkspaceExists(id: WorkspaceId) {
+    if (!this.state.workspaces.some((workspace) => workspace.id === id)) {
+      throw new ControlPlaneRequestError(404, 'workspace_not_found', `Workspace ${id} is not registered.`)
+    }
+  }
+
+  private getSession(id: SessionId) {
+    const session = this.state.sessions.find((entry) => entry.id === id)
+
+    if (!session) {
+      throw new ControlPlaneRequestError(404, 'session_not_found', `Session ${id} is not registered.`)
+    }
+
+    return session
+  }
+
+  private getApproval(id: ApprovalId) {
+    const approval = this.state.approvals.find((entry) => entry.id === id)
+
+    if (!approval) {
+      throw new ControlPlaneRequestError(404, 'approval_not_found', `Approval ${id} is not registered.`)
+    }
+
+    return approval
+  }
+
+  private async maybeCreateSessionNotification(session: SessionSummary) {
+    if (!['completed', 'failed'].includes(session.status)) {
+      return
+    }
+
+    await this.createNotification({
+      id: toNotificationId(session.id),
+      category: 'session-status',
+      title: `Session ${session.status}`,
+      message: `${session.id} is now ${session.status}.`,
+      sessionId: session.id,
+    })
+  }
+
+  private async createNotification(notification: Omit<NotificationRecord, 'createdAt'> & { createdAt?: IsoTimestamp }) {
+    const persistedNotification: NotificationRecord = {
+      ...notification,
+      createdAt: notification.createdAt ?? this.clock(),
+    }
+
+    this.state.notifications = upsertRecord(this.state.notifications, persistedNotification)
+    await this.persistState()
+    this.publishEvent('notification.created', { notification: persistedNotification })
+    return persistedNotification
+  }
+
+  private writeJson(response: ServerResponse<IncomingMessage>, statusCode: number, payload: unknown) {
+    response.writeHead(statusCode, {
+      'Content-Type': 'application/json; charset=utf-8',
+    })
+    response.end(JSON.stringify(payload))
+  }
+
+  private writeError(response: ServerResponse<IncomingMessage>, statusCode: number, code: string, message: string) {
+    this.writeJson(response, statusCode, {
+      error: {
+        code,
+        message,
+      },
+    })
+  }
+}
+
+export async function createControlPlaneServer(options: ControlPlaneServerOptions = {}) {
+  return ControlPlaneServer.create(options)
+}
+
+export async function startControlPlaneHttpServer(options: ControlPlaneServerOptions = {}): Promise<ControlPlaneHttpHandle> {
+  const controlPlane = await createControlPlaneServer(options)
+  const server = controlPlane.createHttpServer()
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+
+  const address = server.address()
+
+  if (!address || typeof address === 'string') {
+    throw new Error('Control plane failed to bind to a TCP address.')
+  }
+
+  return {
+    controlPlane,
+    server,
+    origin: `http://127.0.0.1:${(address as AddressInfo).port}`,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+
+          resolve()
+        })
+      })
+    },
+  }
+}
+
+class ControlPlaneRequestError extends Error {
+  readonly statusCode: number
+
+  readonly code: string
+
+  constructor(statusCode: number, code: string, message: string) {
+    super(message)
+    this.statusCode = statusCode
+    this.code = code
+  }
+}
+
+function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
+  return {
+    hosts: [...(seedState?.hosts ?? emptyState.hosts)],
+    workspaces: [...(seedState?.workspaces ?? emptyState.workspaces)],
+    sessions: [...(seedState?.sessions ?? emptyState.sessions)],
+    approvals: [...(seedState?.approvals ?? emptyState.approvals)],
+    ports: [...(seedState?.ports ?? emptyState.ports)],
+    notifications: [...(seedState?.notifications ?? emptyState.notifications)],
+  }
+}
+
+function cloneState(state: ControlPlaneState): ControlPlaneState {
+  return {
+    hosts: state.hosts.map((host) => ({ ...host })),
+    workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
+    sessions: state.sessions.map((session) => createSessionSummary(session)),
+    approvals: state.approvals.map((approval) => ({
+      ...approval,
+      requestedBy: { ...approval.requestedBy },
+      decidedBy: approval.decidedBy ? { ...approval.decidedBy } : undefined,
+    })),
+    ports: state.ports.map((port) => createForwardedPort(port)),
+    notifications: state.notifications.map((notification) => ({ ...notification })),
+  }
+}
+
+function upsertRecord<TRecord extends { id: string }>(records: readonly TRecord[], nextRecord: TRecord) {
+  return [...records.filter((record) => record.id !== nextRecord.id), nextRecord]
+}
+
+function pickActorIdentity(actor?: AuthenticatedActor) {
+  return actor
+    ? {
+        id: actor.id,
+        displayName: actor.displayName,
+      }
+    : {
+        id: 'system',
+        displayName: 'RemoteAgentServer',
+      }
+}
+
+function toNotificationId(id: string): NotificationId {
+  return `notification_${id.replace(/^[^_]+_/, '')}`
+}
+
+async function readJsonBody(request: IncomingMessage) {
+  const chunks: Uint8Array[] = []
+
+  for await (const chunk of request) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
+  }
+
+  if (chunks.length === 0) {
+    return {}
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }

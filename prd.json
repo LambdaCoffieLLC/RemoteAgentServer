@@ -40,7 +40,9 @@
         "The server persists core metadata required to recover state after restart",
         "Unauthorized access to protected resources is rejected"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a typed control-plane server in apps/server/src/index.ts with protected HTTP APIs for hosts, workspaces, sessions, approvals, forwarded ports, and notifications, plus an SSE event stream at /v1/events. Added JSON-backed persistence and recovery via configurable storagePath, expanded auth scopes for write and approval/notification access control, and added .agents/ralph/tests/us-003-server-control-plane.test.ts to verify unauthorized rejection, API coverage, real-time event delivery, and restart recovery. Verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-004",
