@@ -259,7 +259,9 @@
         "The desktop app stores its token or connection secrets in a desktop-appropriate way for a single-user setup",
         "The desktop app has smoke or integration coverage for the primary operator flow"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Implemented a runnable Electron desktop app in apps/desktop with documented start/build commands, a real main/preload/renderer flow, shared monorepo package reuse, and a desktop operator UI that connects to the control plane, starts and manages sessions, surfaces approvals and previews, and switches between local and remote workspaces in one interface. Added desktop connection storage backed by the app data directory with Electron safeStorage when available plus a user-scoped fallback file, and added an on-demand Electron bootstrap script so the app still launches when package-manager install scripts are blocked. Updated README.md with desktop quickstart and smoke guidance, added product-owned smoke coverage in tests/desktop-app-smoke.test.ts for secure connection persistence plus remote and local operator flows, and verified with pnpm verify and pnpm --filter @remote-agent-server/desktop exec electron --version."
     },
     {
       "id": "US-017",

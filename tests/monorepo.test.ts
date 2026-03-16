@@ -125,6 +125,7 @@ test('README is an operator and contributor entry point with linked deeper docs'
   assert.match(readme, /pnpm --filter @remote-agent-server\/server dev/)
   assert.match(readme, /pnpm --filter @remote-agent-server\/web dev/)
   assert.match(readme, /pnpm --filter @remote-agent-server\/mobile start/)
+  assert.match(readme, /pnpm --filter @remote-agent-server\/desktop start/)
   assert.match(readme, /\/api\/hosts/)
   assert.match(readme, /\/api\/workspaces/)
   assert.match(readme, /\/api\/sessions\/session-1\/changes/)

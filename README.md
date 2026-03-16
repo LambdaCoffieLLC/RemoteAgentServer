@@ -1,13 +1,13 @@
 # RemoteAgentServer
 
-RemoteAgentServer is a single-user, self-hosted remote development control plane. It gives one operator a central place to register hosts and repositories, start coding-agent sessions, review diffs, handle approval prompts, and open forwarded previews from web or mobile clients instead of managing everything over SSH.
+RemoteAgentServer is a single-user, self-hosted remote development control plane. It gives one operator a central place to register hosts and repositories, start coding-agent sessions, review diffs, handle approval prompts, and open forwarded previews from web, mobile, or desktop clients instead of managing everything over SSH.
 
-The current MVP is runnable today for the control plane plus two operator clients:
+The current MVP is runnable today for the control plane plus three operator clients:
 
 - `apps/server`: Node.js control plane with JSON persistence, token auth, session APIs, approvals, and port forwarding
 - `apps/web`: Vite web operator client for inventory, live session events, review, approvals, and previews
 - `apps/mobile`: Expo mobile operator client for the same operator flow on iOS or Android
-- `apps/desktop`: TypeScript package scaffold only; not yet a finished desktop operator app
+- `apps/desktop`: Electron desktop operator client for local and remote workspaces, session controls, approvals, and previews with desktop-safe stored connection settings
 - `packages/runtime`: runtime contract, Linux install helper, enrollment CLI, and provider session manager
 - `packages/auth`, `packages/protocol`, `packages/sessions`, `packages/ports`, `packages/providers`, `packages/ui`: shared domain packages consumed by the apps
 
@@ -87,7 +87,15 @@ Start the current mobile client in a third terminal:
 pnpm --filter @remote-agent-server/mobile start
 ```
 
-Use these connection settings in the web UI or Expo app:
+Start the current desktop client in a fourth terminal:
+
+```bash
+pnpm --filter @remote-agent-server/desktop start
+```
+
+The desktop start script ensures Electron is downloaded on first launch even when a package manager blocks install scripts. The app stores the control-plane URL and operator token in the desktop app data directory, using Electron `safeStorage` when the OS provides it and a user-scoped fallback file otherwise.
+
+Use these connection settings in the web UI, Expo app, or desktop app:
 
 - server URL: `http://127.0.0.1:4318`
 - operator token: `operator-dev-token`
@@ -172,8 +180,9 @@ curl -sS http://127.0.0.1:4318/ports/detected-workspace-workspace-1-4173
 
 1. Open the web client, sign in, and confirm it shows the enrolled host, workspace, session, and the detected preview suggestion before you promote it.
 2. Open the Expo app, sign in with the same URL and token, and confirm it shows the host and live session state.
-3. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
-4. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
+3. Open the desktop app, sign in with the same URL and token, switch between the remote and local workspace tabs, start a session, and confirm approvals and forwarded previews appear in the same interface.
+4. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
+5. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
 
 ### Clean Up The Smoke Test
 
@@ -234,7 +243,7 @@ Product behavior is owned by the repo-level `tests/` suite. Ralph-specific check
 
 - Unit coverage: `tests/shared-packages.test.ts` exercises the shared package business logic and package contracts.
 - Integration coverage: `tests/server-control-plane.test.ts`, `tests/runtime-install.test.ts`, `tests/runtime-provider-adapters.test.ts`, `tests/session-diff-review.test.ts`, and `tests/session-recovery-clients.test.ts` cross real package boundaries for the server, runtime, and client wrappers.
-- Smoke coverage: `tests/web-client-smoke.test.ts` and `tests/mobile-app-smoke.test.ts` cover the primary operator journeys on the current client surfaces.
+- Smoke coverage: `tests/web-client-smoke.test.ts`, `tests/mobile-app-smoke.test.ts`, and `tests/desktop-app-smoke.test.ts` cover the primary operator journeys on the current client surfaces.
 - Command ownership: `pnpm run test:repo` executes the product-owned suites in `tests/**/*.test.ts`, `pnpm run test:ralph` executes `.agents/ralph/tests/*.test.ts`, and `pnpm test` or `pnpm verify` runs both layers.
 - Extension rule: future stories should add the lowest-layer product-owned test that proves the behavior change, then add or extend smoke coverage when the change is user-facing.
 
