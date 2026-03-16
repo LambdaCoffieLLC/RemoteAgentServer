@@ -1,0 +1,17 @@
+{
+  "name": "remote-agent-server",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "ralph": "node --import tsx .agents/ralph/ralph.ts",
+    "ralph:danger": "RALPH_CODEX_BYPASS=true node --import tsx .agents/ralph/ralph.ts",
+    "test": "node --import tsx --test .agents/ralph/tests/*.test.ts",
+    "verify:ralph": "pnpm test && pnpm exec tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

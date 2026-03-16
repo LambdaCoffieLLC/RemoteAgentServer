@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+pnpm-debug.log*
+.agents/ralph/logs/
+.agents/ralph/verification/
+.agents/ralph/latest-run.json
