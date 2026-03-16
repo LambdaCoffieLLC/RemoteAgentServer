@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { execFile } from 'node:child_process'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createTokenCredential, type AuthHeaderName, type AuthPolicy, type AuthScheme } from '@remote-agent-server/auth'
 import { createManagedPort, type ManagedPort, type PortProtocol, type PortState, type PortVisibility } from '@remote-agent-server/ports'
@@ -20,6 +20,7 @@ import {
   type SessionMode,
   type SessionOutputEntry,
   type SessionState,
+  type SessionWorktreeMetadata,
 } from '@remote-agent-server/sessions'
 import { fileURLToPath } from 'node:url'
 
@@ -55,6 +56,9 @@ export interface SessionRecord extends SessionDescriptor {
   hostId: string
   runtimeHostId: string
   workspacePath: string
+  executionPath: string
+  allowDirtyWorkspace: boolean
+  worktree?: SessionWorktreeMetadata
   createdAt: string
   updatedAt: string
   startedAt?: string
@@ -100,6 +104,23 @@ export interface ControlPlaneState {
 
 interface PersistedControlPlaneState extends ControlPlaneState {
   version: 1
+}
+
+interface SessionStartRequest {
+  descriptor: SessionDescriptor
+  workspace: WorkspaceRecord
+  allowDirtyWorkspace: boolean
+  createdAt: string
+  updatedAt: string
+  startedAt?: string
+  completedAt?: string
+  logs: SessionLogEntry[]
+  output: SessionOutputEntry[]
+}
+
+interface SessionExecutionTarget {
+  executionPath: string
+  worktree?: SessionWorktreeMetadata
 }
 
 type SessionMutableFields = Pick<
@@ -241,7 +262,14 @@ async function loadPersistedState(dataFile: string) {
       ...parsed,
       hosts: parsed.hosts ?? [],
       workspaces: parsed.workspaces ?? [],
-      sessions: parsed.sessions ?? [],
+      sessions: (parsed.sessions ?? []).map((session) => {
+        const sessionRecord = session as Partial<SessionRecord>
+        return {
+          ...sessionRecord,
+          executionPath: sessionRecord.executionPath ?? sessionRecord.workspacePath ?? '',
+          allowDirtyWorkspace: sessionRecord.allowDirtyWorkspace ?? false,
+        } as SessionRecord
+      }),
       approvals: parsed.approvals ?? [],
       notifications: parsed.notifications ?? [],
       forwardedPorts: parsed.forwardedPorts ?? [],
@@ -383,6 +411,18 @@ function requireOptionalString(value: unknown, fieldName: string) {
   return requireString(value, fieldName)
 }
 
+function requireOptionalBoolean(value: unknown, fieldName: string) {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (typeof value !== 'boolean') {
+    throw new Error(`"${fieldName}" must be a boolean.`)
+  }
+
+  return value
+}
+
 function requireEnum<TValue extends string>(
   value: unknown,
   fieldName: string,
@@ -432,6 +472,109 @@ async function resolveGitRepository(path: string) {
     return stdout.trim()
   } catch {
     throw new Error(`Repository path "${path}" is not an accessible git repository.`)
+  }
+}
+
+async function runGitCommand(path: string, args: string[]) {
+  return await execFileAsync('git', ['-C', path, ...args])
+}
+
+async function listGitStatusEntries(path: string) {
+  const { stdout } = await runGitCommand(path, ['status', '--porcelain', '--untracked-files=normal'])
+  return stdout
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+}
+
+async function assertCleanGitCheckout(path: string, allowDirtyWorkspace: boolean) {
+  if (allowDirtyWorkspace) {
+    return
+  }
+
+  const entries = await listGitStatusEntries(path)
+  if (entries.length === 0) {
+    return
+  }
+
+  throw new Error(`Workspace path "${path}" has uncommitted changes. Set "allowDirtyWorkspace" to true to run anyway.`)
+}
+
+async function hasCommittedHead(path: string) {
+  try {
+    await runGitCommand(path, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function resolveWorktreeBaseRef(path: string, defaultBranch: string) {
+  const candidateRefs = [`refs/heads/${defaultBranch}`, `refs/remotes/origin/${defaultBranch}`, 'HEAD']
+
+  for (const candidateRef of candidateRefs) {
+    try {
+      const { stdout } = await runGitCommand(path, ['rev-parse', '--verify', '--quiet', candidateRef])
+      if (stdout.trim().length > 0) {
+        return candidateRef
+      }
+    } catch {
+      // Try the next candidate ref.
+    }
+  }
+
+  throw new Error(`Repository path "${path}" could not resolve a base ref for worktree creation.`)
+}
+
+function sanitizeGitRefComponent(value: string) {
+  const sanitized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return sanitized.length > 0 ? sanitized : 'session'
+}
+
+function createSessionWorktreeBranchName(workspaceId: string, sessionId: string) {
+  return `${sanitizeGitRefComponent(workspaceId)}-${sanitizeGitRefComponent(sessionId)}`
+}
+
+function createSessionWorktreePath(workspace: WorkspaceRecord, branchName: string) {
+  return join(dirname(workspace.path), '.remote-agent-server-worktrees', workspace.id, branchName)
+}
+
+async function prepareSessionExecutionTarget(
+  request: SessionStartRequest,
+): Promise<SessionExecutionTarget> {
+  await assertCleanGitCheckout(request.workspace.path, request.allowDirtyWorkspace)
+
+  if (request.descriptor.mode === 'workspace') {
+    return {
+      executionPath: request.workspace.path,
+    }
+  }
+
+  const branchName = createSessionWorktreeBranchName(request.workspace.id, request.descriptor.id)
+  const worktreePath = createSessionWorktreePath(request.workspace, branchName)
+  const createdAt = new Date().toISOString()
+
+  await mkdir(dirname(worktreePath), { recursive: true })
+
+  if (await hasCommittedHead(request.workspace.path)) {
+    const baseRef = await resolveWorktreeBaseRef(request.workspace.path, request.workspace.defaultBranch)
+    await runGitCommand(request.workspace.path, ['worktree', 'add', '-b', branchName, worktreePath, baseRef])
+  } else {
+    await runGitCommand(request.workspace.path, ['worktree', 'add', '--orphan', worktreePath])
+  }
+
+  return {
+    executionPath: worktreePath,
+    worktree: {
+      path: worktreePath,
+      branch: branchName,
+      baseBranch: request.workspace.defaultBranch,
+      createdAt,
+    },
   }
 }
 
@@ -500,7 +643,7 @@ function requireProviderKind(value: unknown, fieldName: string) {
   return requireEnum(value, fieldName, providerKinds satisfies readonly ProviderKind[])
 }
 
-function requireSessionRecord(body: unknown, state: ControlPlaneState): SessionRecord {
+function requireSessionStartRequest(body: unknown, state: ControlPlaneState): SessionStartRequest {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
@@ -530,10 +673,9 @@ function requireSessionRecord(body: unknown, state: ControlPlaneState): SessionR
   })
 
   return {
-    ...descriptor,
-    hostId: workspace.hostId,
-    runtimeHostId: workspace.runtimeHostId,
-    workspacePath: workspace.path,
+    descriptor,
+    workspace,
+    allowDirtyWorkspace: requireOptionalBoolean(record.allowDirtyWorkspace, 'allowDirtyWorkspace') ?? false,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : timestamp,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
     startedAt: requireOptionalString(record.startedAt, 'startedAt'),
@@ -772,17 +914,26 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
   }
 
   async function startManagedSession(body: unknown) {
-    const candidate = requireSessionRecord(body, state)
-    if (findSession(state, candidate.id)) {
-      throw new Error(`Session "${candidate.id}" already exists.`)
+    const candidate = requireSessionStartRequest(body, state)
+    if (findSession(state, candidate.descriptor.id)) {
+      throw new Error(`Session "${candidate.descriptor.id}" already exists.`)
     }
 
+    const executionTarget = await prepareSessionExecutionTarget(candidate)
+
     const session: SessionRecord = {
-      ...candidate,
+      ...candidate.descriptor,
+      hostId: candidate.workspace.hostId,
+      runtimeHostId: candidate.workspace.runtimeHostId,
+      workspacePath: candidate.workspace.path,
+      executionPath: executionTarget.executionPath,
+      allowDirtyWorkspace: candidate.allowDirtyWorkspace,
+      worktree: executionTarget.worktree,
+      createdAt: candidate.createdAt,
       state: 'queued',
       updatedAt: candidate.createdAt,
-      startedAt: undefined,
-      completedAt: undefined,
+      startedAt: candidate.startedAt,
+      completedAt: candidate.completedAt,
       logs: [],
       output: [],
     }
@@ -791,7 +942,7 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     const handle = runtimeSessions.startSession({
       sessionId: session.id,
       workspaceId: session.workspaceId,
-      workspacePath: session.workspacePath,
+      workspacePath: session.executionPath,
       provider: session.provider as ProviderKind,
       mode: session.mode,
     })

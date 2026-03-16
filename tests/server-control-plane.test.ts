@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -592,7 +592,18 @@ test('control plane starts managed sessions, streams runtime events, supports pa
       }),
     })
     assert.equal(createSession.status, 201)
-    assert.equal(((await readJson(createSession)).data as { state: string }).state, 'queued')
+    const createdSession = (await readJson(createSession)).data as {
+      state: string
+      mode: string
+      workspacePath: string
+      executionPath: string
+      worktree?: unknown
+    }
+    assert.equal(createdSession.state, 'queued')
+    assert.equal(createdSession.mode, 'workspace')
+    assert.equal(createdSession.workspacePath, repositoryPath)
+    assert.equal(createdSession.executionPath, repositoryPath)
+    assert.equal(createdSession.worktree, undefined)
 
     const runningEvent = await firstStream.nextEvent((event) => {
       return event.envelope.type === 'session.state.changed' &&
@@ -700,6 +711,118 @@ test('control plane starts managed sessions, streams runtime events, supports pa
     assert.equal(canceledSessionState.state, 'canceled')
     assert.ok(canceledSessionState.logs.length >= 2)
     assert.ok(canceledSessionState.output.length >= 1)
+  } finally {
+    await server.close()
+  }
+})
+
+test('control plane can start sessions in isolated worktrees and rejects dirty repositories unless explicitly allowed', async () => {
+  const tempDir = await createTempDir()
+  const repositoryPath = await createGitRepository(tempDir, 'worktree-repo')
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile: join(tempDir, 'state.json'),
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+  })
+
+  try {
+    const hostRegistration = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostRegistration.status, 201)
+
+    const workspaceRegistration = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+      }),
+    })
+    assert.equal(workspaceRegistration.status, 201)
+
+    await writeFile(join(repositoryPath, 'dirty.txt'), 'pending change\n', 'utf8')
+
+    const rejectedDirtySession = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-dirty-rejected',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+        mode: 'worktree',
+      }),
+    })
+    assert.equal(rejectedDirtySession.status, 400)
+    assert.match(
+      (await readJson(rejectedDirtySession)).error ?? '',
+      /allowDirtyWorkspace/,
+    )
+
+    const allowedDirtySession = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-worktree',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+        mode: 'worktree',
+        allowDirtyWorkspace: true,
+      }),
+    })
+    assert.equal(allowedDirtySession.status, 201)
+
+    const createdSession = (await readJson(allowedDirtySession)).data as {
+      id: string
+      mode: string
+      workspacePath: string
+      executionPath: string
+      allowDirtyWorkspace: boolean
+      worktree?: {
+        path: string
+        branch: string
+        baseBranch: string
+        createdAt: string
+      }
+    }
+    assert.equal(createdSession.id, 'session-worktree')
+    assert.equal(createdSession.mode, 'worktree')
+    assert.equal(createdSession.workspacePath, repositoryPath)
+    assert.notEqual(createdSession.executionPath, repositoryPath)
+    assert.equal(createdSession.allowDirtyWorkspace, true)
+    assert.ok(createdSession.worktree)
+    assert.equal(createdSession.worktree?.path, createdSession.executionPath)
+    assert.equal(createdSession.worktree?.baseBranch, 'main')
+    assert.match(createdSession.worktree?.branch ?? '', /^workspace-1-session-worktree$/)
+    await access(createdSession.executionPath)
+
+    const listedWorktrees = await execFileAsync('git', ['-C', repositoryPath, 'worktree', 'list', '--porcelain'])
+    assert.match(listedWorktrees.stdout, new RegExp(createdSession.executionPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+
+    const persistedSession = await fetch(`${server.url}/api/sessions/session-worktree`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(persistedSession.status, 200)
+    const persisted = (await readJson(persistedSession)).data as {
+      executionPath: string
+      worktree?: {
+        path: string
+      }
+    }
+    assert.equal(persisted.executionPath, createdSession.executionPath)
+    assert.equal(persisted.worktree?.path, createdSession.worktree?.path)
   } finally {
     await server.close()
   }

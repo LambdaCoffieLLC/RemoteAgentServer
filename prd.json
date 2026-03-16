@@ -146,7 +146,9 @@
         "Users can choose direct workspace mode for simple workflows",
         "The implementation includes cleanup behavior or documented cleanup commands for stale worktrees"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended session startup in apps/server so POST /api/sessions now supports direct workspace execution by default or isolated git worktree creation with mode=worktree, persists executionPath plus worktree metadata on the session record, and rejects dirty repositories unless allowDirtyWorkspace is explicitly true. Added the shared SessionWorktreeMetadata type in packages/sessions, documented worktree usage and stale-worktree cleanup commands in README.md, and added product-owned integration coverage in tests/server-control-plane.test.ts for direct workspace mode, worktree creation, metadata persistence, and dirty-workspace rejection/override. Verified with pnpm lint, pnpm build, pnpm typecheck, and pnpm test:repo."
     },
     {
       "id": "US-010",

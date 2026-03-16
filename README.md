@@ -163,7 +163,8 @@ Managed coding sessions are started through `POST /api/sessions` with:
 - `workspaceId`: an existing registered workspace
 - `provider`: one of `claude-code`, `codex`, or `opencode`
 - `id`: optional, otherwise the control plane generates one
-- `mode`: optional, defaults to `workspace`
+- `mode`: optional, defaults to `workspace`; set to `worktree` to create an isolated git worktree for the session before runtime launch
+- `allowDirtyWorkspace`: optional, defaults to `false`; when omitted, session start rejects a workspace checkout with uncommitted or untracked changes
 
 The runtime package now exposes a common provider adapter surface and ships built-in adapters for `claude-code`, `codex`, and `opencode`. The session manager launches every provider through that same adapter contract and turns provider launch/runtime failures into failed sessions with preserved logs and output instead of crashing the runtime.
 
@@ -175,7 +176,15 @@ The control plane starts the session against the workspace's runtime host, persi
 - `session.output` for stdout or stderr chunks
 - `session.snapshot` on a fresh SSE connection so reconnecting clients can recover active session state
 
-Clients can inspect the current recoverable session state, including accumulated logs and output, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
+Workspace mode keeps the execution path pointed at the registered repository for simple workflows. Worktree mode creates a sibling checkout under `.remote-agent-server-worktrees/<workspace-id>/...`, stores the worktree path and branch metadata on the session record, and points runtime execution at that isolated checkout instead. Clients can inspect the current recoverable session state, including accumulated logs, output, `executionPath`, and optional `worktree` metadata, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
+
+If stale worktrees need to be cleaned up manually, list them from the registered repository and then remove or prune them with git:
+
+```bash
+git -C "$REPO_PATH" worktree list
+git -C "$REPO_PATH" worktree remove --force "$WORKTREE_PATH"
+git -C "$REPO_PATH" worktree prune
+```
 
 ### Manual Smoke Test
 
@@ -216,6 +225,12 @@ curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
   -H 'content-type: application/json' \
   -d '{"id":"session-1","workspaceId":"workspace-1","provider":"codex"}' \
+  http://127.0.0.1:4318/api/sessions
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"id":"session-worktree","workspaceId":"workspace-1","provider":"codex","mode":"worktree"}' \
   http://127.0.0.1:4318/api/sessions
 
 curl -sS \

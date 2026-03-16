@@ -9,6 +9,13 @@ export type SessionMode = 'workspace' | 'worktree'
 export type SessionLogLevel = (typeof sessionLogLevels)[number]
 export type SessionOutputStream = (typeof sessionOutputStreams)[number]
 
+export interface SessionWorktreeMetadata {
+  path: string
+  branch: string
+  baseBranch: string
+  createdAt: string
+}
+
 export interface SessionDescriptor {
   id: string
   workspaceId: string
