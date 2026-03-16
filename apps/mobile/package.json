@@ -2,14 +2,17 @@
   "name": "@remote-agent/mobile",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "main": "src/main.ts",
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js"
   },
   "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "build": "tsc -p tsconfig.json",
-    "lint": "eslint src/**/*.ts",
+    "lint": "eslint src/**/*.ts src/**/*.tsx",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -18,6 +21,14 @@
     "@remote-agent/protocol": "workspace:*",
     "@remote-agent/providers": "workspace:*",
     "@remote-agent/sessions": "workspace:*",
-    "@remote-agent/ui": "workspace:*"
+    "@remote-agent/ui": "workspace:*",
+    "expo": "^54.0.0",
+    "expo-linking": "^8.0.0",
+    "expo-web-browser": "^15.0.0",
+    "react": "^19.1.0",
+    "react-native": "^0.81.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0"
   }
 }

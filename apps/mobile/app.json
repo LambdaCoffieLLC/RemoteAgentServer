@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Remote Agent Mobile",
+    "slug": "remote-agent-mobile",
+    "scheme": "remote-agent-mobile",
+    "orientation": "portrait",
+    "platforms": ["ios", "android"],
+    "userInterfaceStyle": "light"
+  }
+}

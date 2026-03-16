@@ -45,17 +45,17 @@ test('US-002 rewires apps to consume the focused shared packages directly', () =
     const dependencies = packageJson.dependencies as Record<string, string>
     const source = readFileSync(resolve(repoRoot, `apps/${appName}/src/index.ts`), 'utf8')
 
-    assert.deepEqual(
-      Object.keys(dependencies).sort(),
-      [
-        '@remote-agent/auth',
-        '@remote-agent/ports',
-        '@remote-agent/protocol',
-        '@remote-agent/providers',
-        '@remote-agent/sessions',
-        '@remote-agent/ui',
-      ],
-    )
+    for (const dependencyName of [
+      '@remote-agent/auth',
+      '@remote-agent/ports',
+      '@remote-agent/protocol',
+      '@remote-agent/providers',
+      '@remote-agent/sessions',
+      '@remote-agent/ui',
+    ]) {
+      assert.equal(dependencies[dependencyName], 'workspace:*')
+    }
+
     assert.match(source, /@remote-agent\/ui/)
     assert.match(source, /@remote-agent\/sessions/)
   }

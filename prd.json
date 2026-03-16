@@ -206,7 +206,9 @@
         "The mobile app can approve or reject pending actions",
         "The mobile app can open forwarded HTTP previews in-app or via the system browser"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Expanded apps/mobile into an Expo-backed React Native app with app.json, an Expo entrypoint, and a mobile screen that signs in with a bearer token, browses hosts or sessions, streams live control-plane events, responds to approvals, and opens forwarded HTTP previews in-app or via the system browser. Replaced the stubbed mobile package surface in apps/mobile/src/index.ts with a typed mobile control-plane client, dashboard/event state helpers, browse-item builders, and preview-opening utilities that mirror the server APIs. Added .agents/ralph/tests/us-015-provide-mobile-app.test.ts coverage for Expo package/config wiring, authenticated host/session browsing, live session state updates from SSE, approval decisions, and forwarded preview opening, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-016",
