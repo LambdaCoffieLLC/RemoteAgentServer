@@ -8,6 +8,7 @@ export type SessionEventKind = 'status' | 'log' | 'output'
 export type SessionLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type SessionOutputStream = 'stdout' | 'stderr'
 export type SessionWorkspaceMode = 'direct' | 'worktree'
+export type SessionChangeType = 'added' | 'modified' | 'renamed' | 'removed'
 
 export interface SessionWorktreeMetadata {
   repositoryPath: string
@@ -47,6 +48,60 @@ export interface SessionEvent {
   status?: SessionStatus
   level?: SessionLogLevel
   stream?: SessionOutputStream
+}
+
+export interface SessionChangedFile {
+  path: string
+  previousPath?: string
+  changeType: SessionChangeType
+  status: string
+  staged: boolean
+  unstaged: boolean
+}
+
+export interface SessionChangeSummary {
+  totalFiles: number
+  added: number
+  modified: number
+  renamed: number
+  removed: number
+}
+
+export interface SessionPatchSummary {
+  additions: number
+  deletions: number
+}
+
+export interface SessionChangesPage {
+  cursor: number
+  limit: number
+  total: number
+  nextCursor?: number
+}
+
+export interface SessionChangeList {
+  sessionId: SessionId
+  items: SessionChangedFile[]
+  page: SessionChangesPage
+  summary: SessionChangeSummary
+}
+
+export interface SessionDiffEntry extends SessionChangedFile {
+  patch: string
+  patchTruncated: boolean
+  additions: number
+  deletions: number
+}
+
+export interface SessionDiff {
+  sessionId: SessionId
+  items: SessionDiffEntry[]
+  page: SessionChangesPage & {
+    maxBytes: number
+  }
+  summary: SessionChangeSummary
+  patchSummary: SessionPatchSummary
+  truncated: boolean
 }
 
 export function createSessionSummary(summary: SessionSummary): SessionSummary {

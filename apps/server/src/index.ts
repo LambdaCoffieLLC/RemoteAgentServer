@@ -23,10 +23,17 @@ import { coreProviderDescriptors } from '@remote-agent/providers'
 import {
   createSessionEvent,
   createSessionSummary,
+  type SessionChangeList,
+  type SessionChangeSummary,
+  type SessionChangedFile,
+  type SessionChangeType,
+  type SessionDiff,
+  type SessionDiffEntry,
   type SessionEvent,
   type SessionEventKind,
   type SessionLogLevel,
   type SessionOutputStream,
+  type SessionPatchSummary,
   type SessionStatus,
   type SessionSummary,
   type SessionWorkspaceMetadata,
@@ -173,6 +180,16 @@ interface CreateSessionEventInput {
 
 interface SessionLifecycleActionInput {
   action: 'pause' | 'resume' | 'cancel'
+}
+
+interface ListSessionChangesInput {
+  cursor?: number
+  limit?: number
+  path?: string
+}
+
+interface ReadSessionDiffInput extends ListSessionChangesInput {
+  maxBytes?: number
 }
 
 interface EnrollRuntimeInput {
@@ -486,6 +503,61 @@ export class ControlPlaneServer {
     return this.state.sessionEvents.filter((event) => event.sessionId === sessionId).sort((left, right) => left.sequence - right.sequence)
   }
 
+  async listSessionChanges(sessionId: SessionId, input: ListSessionChangesInput = {}): Promise<SessionChangeList> {
+    const changedFiles = await this.readSessionChangedFiles(sessionId)
+    const filteredFiles = filterChangedFiles(changedFiles, input.path)
+    const page = paginateChangedFiles(filteredFiles, input.cursor ?? 0, input.limit ?? 50)
+
+    return {
+      sessionId,
+      items: page.items,
+      page: {
+        cursor: page.cursor,
+        limit: page.limit,
+        total: page.total,
+        nextCursor: page.nextCursor,
+      },
+      summary: summarizeChangedFiles(filteredFiles),
+    }
+  }
+
+  async readSessionDiff(sessionId: SessionId, input: ReadSessionDiffInput = {}): Promise<SessionDiff> {
+    const changedFiles = await this.readSessionChangedFiles(sessionId)
+    const filteredFiles = filterChangedFiles(changedFiles, input.path)
+    const page = paginateChangedFiles(filteredFiles, input.cursor ?? 0, input.limit ?? 20)
+    const repositoryPath = await this.resolveSessionChangeRepositoryPath(sessionId)
+    const maxBytes = input.maxBytes ?? 16_384
+    const items: SessionDiffEntry[] = []
+    let truncated = false
+
+    for (const changedFile of page.items) {
+      const patch = await readSessionChangedFilePatch(repositoryPath, changedFile, maxBytes)
+      items.push({
+        ...changedFile,
+        patch: patch.text,
+        patchTruncated: patch.truncated,
+        additions: patch.additions,
+        deletions: patch.deletions,
+      })
+      truncated ||= patch.truncated
+    }
+
+    return {
+      sessionId,
+      items,
+      page: {
+        cursor: page.cursor,
+        limit: page.limit,
+        total: page.total,
+        nextCursor: page.nextCursor,
+        maxBytes,
+      },
+      summary: summarizeChangedFiles(filteredFiles),
+      patchSummary: summarizePatchEntries(items),
+      truncated,
+    }
+  }
+
   async createSession(input: CreateSessionInput, actor?: AuthenticatedActor) {
     this.assertHostExists(input.hostId)
     const workspace = this.getWorkspace(input.workspaceId)
@@ -572,6 +644,21 @@ export class ControlPlaneServer {
     await this.persistState()
     this.publishEvent('session.event.created', { sessionEvent })
     return sessionEvent
+  }
+
+  private async readSessionChangedFiles(sessionId: SessionId) {
+    const repositoryPath = await this.resolveSessionChangeRepositoryPath(sessionId)
+    return readSessionChangedFiles(repositoryPath)
+  }
+
+  private async resolveSessionChangeRepositoryPath(sessionId: SessionId) {
+    const session = this.getSession(sessionId)
+
+    if (session.workspace?.path) {
+      return session.workspace.path
+    }
+
+    return this.getWorkspace(session.workspaceId).path
   }
 
   async listApprovals() {
@@ -834,6 +921,58 @@ export class ControlPlaneServer {
         }
 
         this.writeJson(response, 200, { data: await this.listSessionEvents(pathSegments[2] as SessionId) })
+        return
+      }
+
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'changes' &&
+        !pathSegments[4]
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        const cursor = parsePaginationInteger(url.searchParams.get('cursor'), 'cursor')
+        const limit = parsePaginationInteger(url.searchParams.get('limit'), 'limit')
+
+        this.writeJson(response, 200, {
+          data: await this.listSessionChanges(pathSegments[2] as SessionId, {
+            cursor,
+            limit,
+            path: normalizeSessionChangePathFilter(url.searchParams.get('path')),
+          }),
+        })
+        return
+      }
+
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'changes' &&
+        pathSegments[4] === 'patch'
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        const cursor = parsePaginationInteger(url.searchParams.get('cursor'), 'cursor')
+        const limit = parsePaginationInteger(url.searchParams.get('limit'), 'limit')
+        const maxBytes = parsePaginationInteger(url.searchParams.get('maxBytes'), 'maxBytes')
+
+        this.writeJson(response, 200, {
+          data: await this.readSessionDiff(pathSegments[2] as SessionId, {
+            cursor,
+            limit,
+            maxBytes,
+            path: normalizeSessionChangePathFilter(url.searchParams.get('path')),
+          }),
+        })
         return
       }
 
@@ -1486,6 +1625,304 @@ function normalizeWorkspaceRecord(workspace: WorkspaceRecord) {
       label: runtimeLabel,
     },
   }
+}
+
+interface PaginatedChangedFiles {
+  items: SessionChangedFile[]
+  cursor: number
+  limit: number
+  total: number
+  nextCursor?: number
+}
+
+async function readSessionChangedFiles(repositoryPath: string): Promise<SessionChangedFile[]> {
+  const statusResult = await execGitCommand(repositoryPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+  return parseGitStatusPorcelain(statusResult.stdout).sort(compareChangedFiles)
+}
+
+function parseGitStatusPorcelain(rawStatus: string): SessionChangedFile[] {
+  if (rawStatus.length === 0) {
+    return []
+  }
+
+  const records = rawStatus.split('\u0000').filter((entry) => entry.length > 0)
+  const changedFiles: SessionChangedFile[] = []
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!
+
+    if (record.length < 3) {
+      continue
+    }
+
+    const status = record.slice(0, 2)
+    const path = record.slice(3)
+    let previousPath: string | undefined
+
+    if (status.includes('R') || status.includes('C')) {
+      previousPath = records[index + 1]
+      index += 1
+    }
+
+    changedFiles.push({
+      path,
+      previousPath,
+      changeType: mapGitStatusToSessionChangeType(status),
+      status,
+      staged: isStagedChangeStatus(status[0] ?? ' '),
+      unstaged: isUnstagedChangeStatus(status[1] ?? ' '),
+    })
+  }
+
+  return changedFiles
+}
+
+function compareChangedFiles(left: SessionChangedFile, right: SessionChangedFile) {
+  return left.path.localeCompare(right.path) || (left.previousPath ?? '').localeCompare(right.previousPath ?? '')
+}
+
+function mapGitStatusToSessionChangeType(status: string): SessionChangeType {
+  const [stagedStatus = ' ', unstagedStatus = ' '] = status
+
+  if (status === '??' || stagedStatus === 'A' || unstagedStatus === 'A') {
+    return 'added'
+  }
+
+  if (stagedStatus === 'R' || unstagedStatus === 'R' || stagedStatus === 'C' || unstagedStatus === 'C') {
+    return 'renamed'
+  }
+
+  if (stagedStatus === 'D' || unstagedStatus === 'D') {
+    return 'removed'
+  }
+
+  return 'modified'
+}
+
+function isStagedChangeStatus(status: string) {
+  return status !== ' ' && status !== '?'
+}
+
+function isUnstagedChangeStatus(status: string) {
+  return status !== ' '
+}
+
+function filterChangedFiles(changedFiles: readonly SessionChangedFile[], path?: string) {
+  if (!path) {
+    return [...changedFiles]
+  }
+
+  return changedFiles.filter((changedFile) => changedFile.path === path || changedFile.previousPath === path)
+}
+
+function paginateChangedFiles(changedFiles: readonly SessionChangedFile[], cursor: number, limit: number): PaginatedChangedFiles {
+  const total = changedFiles.length
+  const items = changedFiles.slice(cursor, cursor + limit)
+  const nextCursor = cursor + limit < total ? cursor + limit : undefined
+
+  return {
+    items,
+    cursor,
+    limit,
+    total,
+    nextCursor,
+  }
+}
+
+function summarizeChangedFiles(changedFiles: readonly SessionChangedFile[]): SessionChangeSummary {
+  return changedFiles.reduce<SessionChangeSummary>(
+    (summary, changedFile) => {
+      summary.totalFiles += 1
+      summary[changedFile.changeType] += 1
+      return summary
+    },
+    {
+      totalFiles: 0,
+      added: 0,
+      modified: 0,
+      renamed: 0,
+      removed: 0,
+    },
+  )
+}
+
+function summarizePatchEntries(entries: readonly SessionDiffEntry[]): SessionPatchSummary {
+  return entries.reduce<SessionPatchSummary>(
+    (summary, entry) => {
+      summary.additions += entry.additions
+      summary.deletions += entry.deletions
+      return summary
+    },
+    {
+      additions: 0,
+      deletions: 0,
+    },
+  )
+}
+
+async function readSessionChangedFilePatch(repositoryPath: string, changedFile: SessionChangedFile, maxBytes: number) {
+  const rawPatch = await readRawSessionChangedFilePatch(repositoryPath, changedFile)
+  const { additions, deletions } = countPatchLineChanges(rawPatch)
+  const truncatedPatch = truncatePatch(rawPatch, maxBytes)
+
+  return {
+    text: truncatedPatch.text,
+    truncated: truncatedPatch.truncated,
+    additions,
+    deletions,
+  }
+}
+
+async function readRawSessionChangedFilePatch(repositoryPath: string, changedFile: SessionChangedFile) {
+  if (changedFile.changeType === 'added' && changedFile.status === '??') {
+    return readUntrackedFilePatch(repositoryPath, changedFile.path)
+  }
+
+  const pathArguments = changedFile.previousPath ? [changedFile.previousPath, changedFile.path] : [changedFile.path]
+  const diffResult = await execGitCommand(
+    repositoryPath,
+    ['diff', '--find-renames', '--no-ext-diff', '--submodule=diff', 'HEAD', '--', ...pathArguments],
+    [0, 1],
+  )
+
+  if (diffResult.stdout.length > 0) {
+    return diffResult.stdout
+  }
+
+  if (changedFile.changeType === 'added') {
+    return readUntrackedFilePatch(repositoryPath, changedFile.path)
+  }
+
+  return ''
+}
+
+async function readUntrackedFilePatch(repositoryPath: string, path: string) {
+  const diffResult = await execGitCommand(repositoryPath, ['diff', '--no-index', '--', '/dev/null', path], [0, 1])
+  return diffResult.stdout
+}
+
+function countPatchLineChanges(patch: string) {
+  let additions = 0
+  let deletions = 0
+
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue
+    }
+
+    if (line.startsWith('+')) {
+      additions += 1
+      continue
+    }
+
+    if (line.startsWith('-')) {
+      deletions += 1
+    }
+  }
+
+  return {
+    additions,
+    deletions,
+  }
+}
+
+function truncatePatch(patch: string, maxBytes: number) {
+  const patchBuffer = Buffer.from(patch, 'utf8')
+
+  if (patchBuffer.byteLength <= maxBytes) {
+    return {
+      text: patch,
+      truncated: false,
+    }
+  }
+
+  const suffix = '\n... diff truncated ...\n'
+  const suffixBuffer = Buffer.from(suffix, 'utf8')
+  const availableBytes = Math.max(0, maxBytes - suffixBuffer.byteLength)
+
+  return {
+    text: patchBuffer.subarray(0, availableBytes).toString('utf8') + suffix,
+    truncated: true,
+  }
+}
+
+async function execGitCommand(repositoryPath: string, args: string[], allowedExitCodes: number[] = [0]) {
+  try {
+    const result = await execFile('git', ['-C', repositoryPath, ...args], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    })
+
+    return {
+      stdout: toExecCommandText(result.stdout),
+      stderr: toExecCommandText(result.stderr),
+    }
+  } catch (error) {
+    const exitCode = typeof error === 'object' && error && 'code' in error ? error.code : undefined
+
+    if (typeof exitCode === 'number' && allowedExitCodes.includes(exitCode)) {
+      const execError = error as {
+        stdout?: unknown
+        stderr?: unknown
+      }
+
+      return {
+        stdout: toExecCommandText(execError.stdout),
+        stderr: toExecCommandText(execError.stderr),
+      }
+    }
+
+    throw new ControlPlaneRequestError(
+      500,
+      'session_change_read_failed',
+      `Failed to inspect git changes in ${repositoryPath}: ${toErrorMessage(error)}`,
+    )
+  }
+}
+
+function toExecCommandText(value: unknown) {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  if (value instanceof Buffer) {
+    return value.toString('utf8')
+  }
+
+  return ''
+}
+
+function parsePaginationInteger(value: string | null, field: 'cursor' | 'limit' | 'maxBytes') {
+  if (value === null) {
+    return undefined
+  }
+
+  const parsed = Number.parseInt(value, 10)
+
+  if (!Number.isInteger(parsed)) {
+    throw new ControlPlaneRequestError(400, 'invalid_query_parameter', `${field} must be an integer.`)
+  }
+
+  if (field === 'cursor') {
+    if (parsed < 0) {
+      throw new ControlPlaneRequestError(400, 'invalid_query_parameter', 'cursor must be zero or greater.')
+    }
+
+    return parsed
+  }
+
+  const maximum = field === 'limit' ? 100 : 262_144
+
+  if (parsed < 1 || parsed > maximum) {
+    throw new ControlPlaneRequestError(400, 'invalid_query_parameter', `${field} must be between 1 and ${maximum}.`)
+  }
+
+  return parsed
+}
+
+function normalizeSessionChangePathFilter(value: string | null) {
+  const normalizedValue = value?.trim()
+  return normalizedValue && normalizedValue.length > 0 ? normalizedValue : undefined
 }
 
 interface PrepareSessionWorkspaceOptions {

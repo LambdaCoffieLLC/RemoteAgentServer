@@ -137,7 +137,9 @@
         "Large diffs degrade gracefully through truncation or pagination",
         "The change view clearly identifies added, modified, renamed, and removed files"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended apps/server/src/index.ts with session change-review APIs at GET /v1/sessions/:id/changes and GET /v1/sessions/:id/changes/patch, backed by git status/diff inspection of the session workspace so clients can list changed files, inspect per-file diffs, and receive patch summaries with explicit added/modified/renamed/removed classification. Added pagination for changed-file and diff listings plus maxBytes-based diff truncation for large patches, introduced shared session change/diff types in packages/sessions/src/index.ts, and added .agents/ralph/tests/us-010-review-session-diffs.test.ts coverage for changed-file listing, rename/remove detection, patch summaries, pagination, and truncation. Verified with node --import tsx --test .agents/ralph/tests/us-010-review-session-diffs.test.ts, pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-011",
