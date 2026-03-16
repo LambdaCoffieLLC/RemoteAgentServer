@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type ProviderApprovalDecision,
+  type ProviderApprovalHandler,
+  type ProviderApprovalRequest,
+} from '@remote-agent-server/providers'
+import {
   createSessionDescriptor,
   createSessionLogEntry,
   createSessionOutputEntry,
@@ -63,6 +68,7 @@ export interface RuntimeSessionManager {
 
 export interface RuntimeSessionManagerOptions {
   providerAdapters?: RuntimeProviderAdapterRegistry | Iterable<RuntimeProviderAdapter>
+  approvalHandler?: ProviderApprovalHandler
 }
 
 class InProcessRuntimeSession implements RuntimeSessionHandle {
@@ -80,10 +86,12 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
   private completedAt?: string
   private launchTimer?: NodeJS.Timeout
   private providerProcess?: RuntimeProviderProcess
+  private pendingApprovalId?: string
 
   constructor(
     private readonly request: RuntimeSessionStartRequest,
     private readonly providerAdapters: RuntimeProviderAdapterRegistry,
+    private readonly approvalHandler: ProviderApprovalHandler | undefined,
     private readonly onTerminal: (sessionId: string) => void,
   ) {
     this.id = request.sessionId
@@ -199,6 +207,9 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
 
             this.pushOutput(stream, text)
           },
+          onApprovalRequest: async (approval) => {
+            return await this.handleApprovalRequest(approval)
+          },
           onExit: (result) => {
             if (this.isTerminal()) {
               return
@@ -290,6 +301,40 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
     this.setState('failed', message)
   }
 
+  private async handleApprovalRequest(approval: ProviderApprovalRequest): Promise<ProviderApprovalDecision> {
+    if (!this.approvalHandler) {
+      throw new Error(`No approval handler is configured for privileged action "${approval.action}".`)
+    }
+
+    if (this.pendingApprovalId) {
+      throw new Error(`Session "${this.id}" is already waiting on approval "${this.pendingApprovalId}".`)
+    }
+
+    this.pendingApprovalId = approval.id
+    this.pushLog('warning', approval.message)
+    this.setState('blocked', `Awaiting approval for "${approval.action}".`)
+
+    try {
+      const decision = await this.approvalHandler.requestApproval(approval)
+      if (this.isTerminal()) {
+        return decision
+      }
+
+      if (decision.status === 'approved') {
+        this.pushLog('info', `Approved privileged action "${decision.action}".`)
+        this.setState('running', `Approved privileged action "${decision.action}".`)
+        return decision
+      }
+
+      this.pushLog('warning', `Rejected privileged action "${decision.action}".`)
+      throw new Error(`Privileged action "${decision.action}" was rejected by the operator.`)
+    } finally {
+      if (this.pendingApprovalId === approval.id) {
+        this.pendingApprovalId = undefined
+      }
+    }
+  }
+
   private clearLaunchTimer() {
     if (this.launchTimer) {
       clearTimeout(this.launchTimer)
@@ -324,9 +369,14 @@ export function createRuntimeSessionManager(options: RuntimeSessionManagerOption
         throw new Error(`Session "${request.sessionId}" is already active in the runtime.`)
       }
 
-      const session = new InProcessRuntimeSession(request, providerAdapters, (sessionId) => {
-        sessions.delete(sessionId)
-      })
+      const session = new InProcessRuntimeSession(
+        request,
+        providerAdapters,
+        options.approvalHandler,
+        (sessionId) => {
+          sessions.delete(sessionId)
+        },
+      )
       sessions.set(request.sessionId, session)
       return session
     },

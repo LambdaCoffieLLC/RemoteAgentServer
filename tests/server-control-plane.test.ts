@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
+import { createApprovalClient } from '../apps/web/src/index.js'
 import { startControlPlaneServer, type ControlPlaneEvent } from '../apps/server/src/index.js'
+import { createCodexProviderAdapter } from '../packages/runtime/src/index.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -311,6 +313,7 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
     workspaces: unknown[]
     sessions: unknown[]
     approvals: unknown[]
+    auditLog: unknown[]
     notifications: unknown[]
     forwardedPorts: unknown[]
   }
@@ -320,6 +323,7 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
   assert.equal(persistedState.workspaces.length, 1)
   assert.equal(persistedState.sessions.length, 1)
   assert.equal(persistedState.approvals.length, 1)
+  assert.equal(persistedState.auditLog.length, 0)
   assert.equal(persistedState.notifications.length, 1)
   assert.equal(persistedState.forwardedPorts.length, 1)
 
@@ -349,6 +353,178 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
     }
   } finally {
     await restartedServer.close()
+  }
+})
+
+test('control plane runs approval requests through client decisions, audit logging, and session outcomes', async () => {
+  const tempDir = await createTempDir()
+  const dataFile = join(tempDir, 'state.json')
+  const repositoryPath = await createGitRepository(tempDir)
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile,
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+    runtimeProviderAdapters: [
+      createCodexProviderAdapter({
+        approvals: [
+          {
+            action: 'sudo apt install ripgrep',
+            message: 'Approval required for sudo apt install ripgrep.',
+            afterStep: 2,
+          },
+        ],
+      }),
+    ],
+  })
+
+  const approvalClient = createApprovalClient({
+    baseUrl: server.url,
+    token: 'operator-secret',
+  })
+
+  try {
+    const hostResponse = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostResponse.status, 201)
+
+    const workspaceResponse = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+        runtimeHostId: 'host-1',
+      }),
+    })
+    assert.equal(workspaceResponse.status, 201)
+
+    const eventStream = await openEventStream(server.url, 'operator-secret')
+
+    const approvedSessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-approved',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(approvedSessionResponse.status, 201)
+
+    const approvalRequestedEvent = await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as { sessionId?: string }
+      return event.envelope.type === 'approval.requested' && payload.sessionId === 'session-approved'
+    })
+    const requestedApproval = approvalRequestedEvent.envelope.payload as { id: string; sessionId: string; status: string }
+    assert.equal(requestedApproval.status, 'pending')
+
+    const pendingApprovals = await approvalClient.listApprovals()
+    assert.equal(pendingApprovals.some((entry) => entry.id === requestedApproval.id && entry.status === 'pending'), true)
+
+    const approvedDecision = await approvalClient.decideApproval(requestedApproval.id, 'approved')
+    assert.equal(approvedDecision.status, 'approved')
+
+    await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as { session?: { id?: string; state?: string } }
+      return event.envelope.type === 'session.state.changed' &&
+        payload.session?.id === 'session-approved' &&
+        payload.session.state === 'completed'
+    })
+
+    const approvedSession = await fetch(`${server.url}/api/sessions/session-approved`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(approvedSession.status, 200)
+    const approvedSessionRecord = (await readJson(approvedSession)).data as {
+      state: string
+      logs: Array<{ message: string }>
+    }
+    assert.equal(approvedSessionRecord.state, 'completed')
+    assert.equal(
+      approvedSessionRecord.logs.some((entry) => entry.message.includes('Approved privileged action "sudo apt install ripgrep".')),
+      true,
+    )
+
+    const rejectedSessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-rejected',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(rejectedSessionResponse.status, 201)
+
+    const rejectionRequestedEvent = await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as { sessionId?: string }
+      return event.envelope.type === 'approval.requested' && payload.sessionId === 'session-rejected'
+    })
+    const rejectedApproval = rejectionRequestedEvent.envelope.payload as { id: string }
+
+    const rejectedDecision = await approvalClient.decideApproval(rejectedApproval.id, 'rejected')
+    assert.equal(rejectedDecision.status, 'rejected')
+
+    await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as { session?: { id?: string; state?: string } }
+      return event.envelope.type === 'session.state.changed' &&
+        payload.session?.id === 'session-rejected' &&
+        payload.session.state === 'failed'
+    })
+
+    const rejectedSession = await fetch(`${server.url}/api/sessions/session-rejected`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(rejectedSession.status, 200)
+    const rejectedSessionRecord = (await readJson(rejectedSession)).data as {
+      state: string
+      logs: Array<{ level: string; message: string }>
+    }
+    assert.equal(rejectedSessionRecord.state, 'failed')
+    assert.equal(
+      rejectedSessionRecord.logs.some((entry) => entry.level === 'error' && entry.message.includes('was rejected by the operator')),
+      true,
+    )
+
+    await eventStream.close()
+
+    const persistedState = JSON.parse(await readFile(dataFile, 'utf8')) as {
+      approvals: Array<{ id: string; status: string; decidedAt?: string }>
+      auditLog: Array<{ targetId: string; outcome: string; action: string }>
+    }
+    assert.equal(
+      persistedState.approvals.some((entry) => entry.id === requestedApproval.id && entry.status === 'approved' && Boolean(entry.decidedAt)),
+      true,
+    )
+    assert.equal(
+      persistedState.approvals.some((entry) => entry.id === rejectedApproval.id && entry.status === 'rejected' && Boolean(entry.decidedAt)),
+      true,
+    )
+    assert.equal(
+      persistedState.auditLog.some((entry) => entry.targetId === requestedApproval.id && entry.outcome === 'approved' && entry.action === 'approval.approved'),
+      true,
+    )
+    assert.equal(
+      persistedState.auditLog.some((entry) => entry.targetId === rejectedApproval.id && entry.outcome === 'rejected' && entry.action === 'approval.rejected'),
+      true,
+    )
+  } finally {
+    await server.close()
   }
 })
 

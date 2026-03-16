@@ -10,6 +10,7 @@ import {
   type RuntimeSessionHandle,
   type RuntimeSessionSnapshot,
 } from '../packages/runtime/src/index.js'
+import { type ProviderApprovalDecision, type ProviderApprovalRequest } from '../packages/providers/src/index.js'
 
 const terminalStates = new Set(['completed', 'failed', 'canceled'])
 
@@ -67,6 +68,38 @@ async function waitForTerminalSession(handle: RuntimeSessionHandle) {
         events,
         snapshot: handle.getSnapshot(),
       })
+    })
+  })
+}
+
+async function waitForSessionState(handle: RuntimeSessionHandle, expectedState: string) {
+  return await new Promise<RuntimeSessionSnapshot>((resolve, reject) => {
+    let unsubscribe: () => void = () => {}
+    const timeout = setTimeout(() => {
+      unsubscribe()
+      reject(new Error(`Timed out waiting for session "${handle.id}" to reach state "${expectedState}".`))
+    }, 5_000)
+
+    const snapshot = handle.getSnapshot()
+    if (snapshot.session.state === expectedState) {
+      clearTimeout(timeout)
+      resolve(snapshot)
+      return
+    }
+
+    unsubscribe = handle.subscribe((event) => {
+      if (event.type !== 'session.state.changed') {
+        return
+      }
+
+      const state = (event.payload as { session: { state: string } }).session.state
+      if (state !== expectedState) {
+        return
+      }
+
+      clearTimeout(timeout)
+      unsubscribe()
+      resolve(handle.getSnapshot())
     })
   })
 }
@@ -186,3 +219,61 @@ for (const fixture of providerFixtures) {
     }
   })
 }
+
+test('providers can raise approval-required actions through the runtime approval interface', async () => {
+  const approvalRequests: ProviderApprovalRequest[] = []
+  let resolveApproval: ((decision: ProviderApprovalDecision) => void) | undefined
+  const approvalDecision = new Promise<ProviderApprovalDecision>((resolve) => {
+    resolveApproval = resolve
+  })
+
+  const manager = createRuntimeSessionManager({
+    providerAdapters: [
+      createCodexProviderAdapter({
+        approvals: [
+          {
+            action: 'sudo apt install ripgrep',
+            message: 'Approval required for privileged package installation.',
+            afterStep: 2,
+          },
+        ],
+      }),
+    ],
+    approvalHandler: {
+      requestApproval: async (request) => {
+        approvalRequests.push(request)
+        return await approvalDecision
+      },
+    },
+  })
+
+  try {
+    const handle = manager.startSession({
+      sessionId: 'codex-approval',
+      workspaceId: 'workspace-1',
+      workspacePath: '/tmp/workspace',
+      provider: 'codex',
+    })
+
+    const blockedSnapshot = await waitForSessionState(handle, 'blocked')
+    assert.equal(blockedSnapshot.session.state, 'blocked')
+    assert.equal(approvalRequests.length, 1)
+    assert.equal(approvalRequests[0]?.action, 'sudo apt install ripgrep')
+    assert.equal(approvalRequests[0]?.status, 'pending')
+
+    resolveApproval?.({
+      ...approvalRequests[0]!,
+      status: 'approved',
+      decidedAt: new Date().toISOString(),
+    })
+
+    const { snapshot } = await waitForTerminalSession(handle)
+    assert.equal(snapshot.session.state, 'completed')
+    assert.equal(
+      snapshot.logs.some((entry) => entry.message.includes('Approved privileged action "sudo apt install ripgrep".')),
+      true,
+    )
+  } finally {
+    manager.dispose()
+  }
+})

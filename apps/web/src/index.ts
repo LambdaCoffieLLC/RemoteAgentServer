@@ -1,7 +1,12 @@
 import { createAuthPolicy, type AuthPolicy } from '@remote-agent-server/auth'
 import { createManagedPort, type ManagedPort } from '@remote-agent-server/ports'
 import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
-import { createProviderDescriptor, type ProviderDescriptor } from '@remote-agent-server/providers'
+import {
+  createProviderDescriptor,
+  type ProviderApprovalRecord,
+  type ProviderApprovalStatus,
+  type ProviderDescriptor,
+} from '@remote-agent-server/providers'
 import {
   createSessionDescriptor,
   type SessionChangeSet,
@@ -37,6 +42,20 @@ export interface SessionReviewClientOptions {
 export interface SessionReviewClient {
   listChangedFiles(sessionId: string): Promise<SessionChangeSet>
   viewDiff(sessionId: string, request?: SessionDiffRequest): Promise<SessionDiffPage>
+}
+
+export interface ApprovalClientOptions {
+  baseUrl: string
+  token: string
+  fetch?: typeof fetch
+}
+
+export interface ApprovalClient {
+  listApprovals(): Promise<ProviderApprovalRecord[]>
+  decideApproval(
+    approvalId: string,
+    status: Extract<ProviderApprovalStatus, 'approved' | 'rejected'>,
+  ): Promise<ProviderApprovalRecord>
 }
 
 function createAuthorizedHeaders(token: string) {
@@ -85,6 +104,30 @@ export function createSessionReviewClient(options: SessionReviewClientOptions): 
   }
 }
 
+export function createApprovalClient(options: ApprovalClientOptions): ApprovalClient {
+  const fetchImpl = options.fetch ?? fetch
+
+  return {
+    async listApprovals() {
+      const response = await fetchImpl(`${options.baseUrl}/api/approvals`, {
+        headers: createAuthorizedHeaders(options.token),
+      })
+      return await readResponseJson<ProviderApprovalRecord[]>(response)
+    },
+    async decideApproval(approvalId, status) {
+      const response = await fetchImpl(`${options.baseUrl}/api/approvals/${approvalId}/decision`, {
+        method: 'POST',
+        headers: {
+          ...createAuthorizedHeaders(options.token),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      })
+      return await readResponseJson<ProviderApprovalRecord>(response)
+    },
+  }
+}
+
 export function createWebManifest(): WebManifest {
   const provider = createProviderDescriptor('codex', 'codex')
   const session = createSessionDescriptor({
@@ -110,6 +153,7 @@ export function createWebManifest(): WebManifest {
     nav: [
       createNavigationItem('hosts', 'Hosts', '/hosts'),
       createNavigationItem('sessions', 'Sessions', '/sessions'),
+      createNavigationItem('approvals', 'Approvals', '/approvals'),
     ],
     status: createStatusBadge('Connected', 'success'),
     stream: createProtocolEnvelope('session.stream', 'web', {

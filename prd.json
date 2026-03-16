@@ -176,7 +176,9 @@
         "Rejected actions are surfaced cleanly to the running session",
         "The approval flow is covered by integration tests from request through decision and session outcome"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended the shared provider contract with approval request/decision models, taught the runtime session manager and scripted provider adapters to raise privileged actions through that common interface, block sessions while awaiting a decision, resume on approval, and fail cleanly on rejection. Wired the control plane so pending approvals are persisted at /api/approvals, operator clients can approve or reject through POST /api/approvals/:id/decision, approval decisions are appended to a persisted audit log, and rejection outcomes are surfaced back into the running session with explicit log/state updates. Added a web approval client helper in apps/web and product-owned coverage in tests/runtime-provider-adapters.test.ts plus tests/server-control-plane.test.ts for the full request-to-decision-to-session-outcome flow. Verified with pnpm verify."
     },
     {
       "id": "US-012",

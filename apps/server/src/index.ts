@@ -7,10 +7,22 @@ import { promisify } from 'node:util'
 import { createTokenCredential, type AuthHeaderName, type AuthPolicy, type AuthScheme } from '@remote-agent-server/auth'
 import { createManagedPort, type ManagedPort, type PortProtocol, type PortState, type PortVisibility } from '@remote-agent-server/ports'
 import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
-import { createProviderDescriptor, providerKinds, type ProviderKind } from '@remote-agent-server/providers'
+import {
+  createProviderApprovalDecision,
+  createProviderDescriptor,
+  providerApprovalStatuses,
+  providerKinds,
+  type ProviderApprovalDecision,
+  type ProviderApprovalHandler,
+  type ProviderApprovalRequest,
+  type ProviderApprovalStatus,
+  type ProviderKind,
+} from '@remote-agent-server/providers'
 import {
   createRuntimeManifest,
   createRuntimeSessionManager,
+  type RuntimeProviderAdapter,
+  type RuntimeProviderAdapterRegistry,
   type RuntimeSessionHandle,
 } from '@remote-agent-server/runtime'
 import {
@@ -77,10 +89,24 @@ export interface SessionRecord extends SessionDescriptor {
 export interface ApprovalRecord {
   id: string
   sessionId: string
+  provider: ProviderKind
   action: string
-  status: 'pending' | 'approved' | 'rejected'
+  message: string
+  status: ProviderApprovalStatus
   requestedAt: string
   decidedAt?: string
+}
+
+export interface AuditLogEntry {
+  id: string
+  timestamp: string
+  actor: 'operator'
+  action: 'approval.approved' | 'approval.rejected'
+  targetType: 'approval'
+  targetId: string
+  sessionId: string
+  outcome: 'approved' | 'rejected'
+  detail: string
 }
 
 export interface NotificationRecord {
@@ -105,6 +131,7 @@ export interface ControlPlaneState {
   workspaces: WorkspaceRecord[]
   sessions: SessionRecord[]
   approvals: ApprovalRecord[]
+  auditLog: AuditLogEntry[]
   notifications: NotificationRecord[]
   forwardedPorts: ForwardedPortRecord[]
 }
@@ -153,6 +180,7 @@ export interface ControlPlaneConfig {
 
 export interface StartControlPlaneOptions extends Partial<ControlPlaneConfigFile> {
   configFile?: string
+  runtimeProviderAdapters?: RuntimeProviderAdapterRegistry | Iterable<RuntimeProviderAdapter>
 }
 
 export interface ControlPlaneEvent<TPayload = unknown> {
@@ -186,6 +214,7 @@ function createEmptyState(): ControlPlaneState {
     workspaces: [],
     sessions: [],
     approvals: [],
+    auditLog: [],
     notifications: [],
     forwardedPorts: [],
   }
@@ -197,6 +226,7 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
     workspaces: [...state.workspaces],
     sessions: [...state.sessions],
     approvals: [...state.approvals],
+    auditLog: [...state.auditLog],
     notifications: [...state.notifications],
     forwardedPorts: [...state.forwardedPorts],
   }
@@ -278,6 +308,7 @@ async function loadPersistedState(dataFile: string) {
         } as SessionRecord
       }),
       approvals: parsed.approvals ?? [],
+      auditLog: parsed.auditLog ?? [],
       notifications: parsed.notifications ?? [],
       forwardedPorts: parsed.forwardedPorts ?? [],
     } satisfies ControlPlaneState
@@ -1005,8 +1036,13 @@ function requireApprovalRecord(body: unknown): ApprovalRecord {
   return {
     id: requireString(record.id ?? `approval-${randomUUID()}`, 'id'),
     sessionId: requireString(record.sessionId, 'sessionId'),
+    provider: requireProviderKind(record.provider ?? 'codex', 'provider'),
     action: requireString(record.action, 'action'),
-    status: requireEnum(record.status ?? 'pending', 'status', ['pending', 'approved', 'rejected']),
+    message:
+      typeof record.message === 'string' && record.message.trim().length > 0
+        ? requireString(record.message, 'message')
+        : `Approval required for privileged action "${requireString(record.action, 'action')}".`,
+    status: requireEnum(record.status ?? 'pending', 'status', providerApprovalStatuses),
     requestedAt: typeof record.requestedAt === 'string' ? record.requestedAt : new Date().toISOString(),
     decidedAt: requireOptionalString(record.decidedAt, 'decidedAt'),
   }
@@ -1088,9 +1124,16 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
   const config = await resolveControlPlaneConfig(options)
   const state = await loadPersistedState(config.dataFile)
   const runtime = createRuntimeManifest('remote-control-plane-runtime')
-  const runtimeSessions = createRuntimeSessionManager()
   const clients = new Set<ServerResponse>()
   const activeRuntimeHandles = new Map<string, RuntimeSessionHandle>()
+  const pendingApprovalDecisions = new Map<
+    string,
+    {
+      sessionId: string
+      resolve: (decision: ProviderApprovalDecision) => void
+      reject: (error: Error) => void
+    }
+  >()
   const eventBacklog: ControlPlaneEvent[] = []
   let persistSequence = Promise.resolve()
   const maxEventBacklog = 250
@@ -1152,6 +1195,63 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
 
     sendJson(response, 200, { data: removedRecord })
   }
+
+  async function appendAuditLogEntry(entry: AuditLogEntry) {
+    state.auditLog.push(entry)
+    await persistCurrentState()
+  }
+
+  function createApprovalAuditLogEntry(approval: ApprovalRecord): AuditLogEntry {
+    if (approval.status === 'pending' || !approval.decidedAt) {
+      throw new Error(`Approval "${approval.id}" cannot be written to the audit log before it is decided.`)
+    }
+
+    return {
+      id: `audit-${randomUUID()}`,
+      timestamp: approval.decidedAt,
+      actor: 'operator',
+      action: approval.status === 'approved' ? 'approval.approved' : 'approval.rejected',
+      targetType: 'approval',
+      targetId: approval.id,
+      sessionId: approval.sessionId,
+      outcome: approval.status,
+      detail: approval.message,
+    }
+  }
+
+  async function requestSessionApproval(request: ProviderApprovalRequest): Promise<ProviderApprovalDecision> {
+    if (pendingApprovalDecisions.has(request.id)) {
+      throw new Error(`Approval "${request.id}" is already pending.`)
+    }
+
+    const approval: ApprovalRecord = {
+      id: request.id,
+      sessionId: request.sessionId,
+      provider: request.provider,
+      action: request.action,
+      message: request.message,
+      status: 'pending',
+      requestedAt: request.requestedAt,
+      decidedAt: undefined,
+    }
+
+    await upsertAndBroadcast(approval, 'approvals', 'approval.requested')
+
+    return await new Promise<ProviderApprovalDecision>((resolve, reject) => {
+      pendingApprovalDecisions.set(approval.id, {
+        sessionId: approval.sessionId,
+        resolve,
+        reject,
+      })
+    })
+  }
+
+  const runtimeSessions = createRuntimeSessionManager({
+    providerAdapters: options.runtimeProviderAdapters,
+    approvalHandler: {
+      requestApproval: async (request) => await requestSessionApproval(request),
+    } satisfies ProviderApprovalHandler,
+  })
 
   async function commit<TRecord>(
     response: ServerResponse,
@@ -1458,13 +1558,34 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         }
 
         const body = asRecord(await readJsonBody(request))
+        if (approval.status !== 'pending') {
+          sendError(response, 409, `Approval "${approvalId}" has already been decided.`)
+          return
+        }
+
         const decision = requireEnum(body?.status, 'status', ['approved', 'rejected'])
+        const decidedAt = new Date().toISOString()
         const updatedApproval: ApprovalRecord = {
           ...approval,
           status: decision,
-          decidedAt: new Date().toISOString(),
+          decidedAt,
         }
-        await commit(response, updatedApproval, 'approvals', 'approval.decided')
+        await upsertAndBroadcast(updatedApproval, 'approvals', 'approval.decided')
+        await appendAuditLogEntry(createApprovalAuditLogEntry(updatedApproval))
+
+        const pendingDecision = pendingApprovalDecisions.get(approvalId)
+        if (pendingDecision) {
+          pendingApprovalDecisions.delete(approvalId)
+          pendingDecision.resolve(
+            createProviderApprovalDecision({
+              ...updatedApproval,
+              status: decision,
+              decidedAt,
+            }),
+          )
+        }
+
+        sendJson(response, 200, { data: updatedApproval })
         return
       }
 
@@ -1518,6 +1639,11 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       return cloneState(state)
     },
     async close() {
+      for (const pendingDecision of pendingApprovalDecisions.values()) {
+        pendingDecision.reject(new Error('Control plane stopped while waiting for an approval decision.'))
+      }
+      pendingApprovalDecisions.clear()
+
       runtimeSessions.dispose()
       for (const client of clients) {
         client.end()

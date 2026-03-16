@@ -178,6 +178,17 @@ The control plane starts the session against the workspace's runtime host, persi
 
 Workspace mode keeps the execution path pointed at the registered repository for simple workflows. Worktree mode creates a sibling checkout under `.remote-agent-server-worktrees/<workspace-id>/...`, stores the worktree path and branch metadata on the session record, and points runtime execution at that isolated checkout instead. Clients can inspect the current recoverable session state, including accumulated logs, output, `executionPath`, and optional `worktree` metadata, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
 
+### Privileged Action Approvals
+
+Providers can now raise privileged actions through a shared approval interface. When a provider requests approval, the runtime moves the session to `blocked`, the control plane persists a pending record under `GET /api/approvals`, and the server broadcasts `approval.requested`.
+
+Operators can then decide the pending action with:
+
+- `POST /api/approvals/<approval-id>/decision` and body `{"status":"approved"}`
+- `POST /api/approvals/<approval-id>/decision` and body `{"status":"rejected"}`
+
+Approved actions return the session to `running` and let the provider continue. Rejected actions are surfaced back into the runtime as a clean session failure with an explicit rejection message. Every approval decision is also appended to the persisted JSON audit log with actor, target, timestamp, and outcome metadata.
+
 ### Session Change Review
 
 Operators can review git-backed session changes without leaving the control plane:
@@ -267,6 +278,16 @@ curl -sS -X POST \
 curl -sS -X POST \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/sessions/session-1/cancel
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/approvals
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"status":"approved"}' \
+  http://127.0.0.1:4318/api/approvals/<approval-id>/decision
 
 curl -N \
   -H 'Authorization: Bearer operator-dev-token' \

@@ -1,4 +1,10 @@
-import { type ProviderKind } from '@remote-agent-server/providers'
+import { randomUUID } from 'node:crypto'
+import {
+  createProviderApprovalRequest,
+  type ProviderApprovalDecision,
+  type ProviderApprovalRequest,
+  type ProviderKind,
+} from '@remote-agent-server/providers'
 import {
   type SessionLogLevel,
   type SessionMode,
@@ -8,6 +14,7 @@ import {
 type ScriptedRuntimeProviderStep =
   | { kind: 'log'; level: SessionLogLevel; message: string }
   | { kind: 'output'; stream: SessionOutputStream; text: string }
+  | { kind: 'approval'; action: string; message: string }
 
 export interface RuntimeProviderLaunchRequest {
   sessionId: string
@@ -29,6 +36,7 @@ export type RuntimeProviderFailureMode =
 export interface RuntimeProviderObserver {
   onLog(level: SessionLogLevel, message: string): void
   onOutput(stream: SessionOutputStream, text: string): void
+  onApprovalRequest(request: ProviderApprovalRequest): Promise<ProviderApprovalDecision>
   onExit(result: RuntimeProviderExit): void
   onFailure(error: Error): void
 }
@@ -53,6 +61,13 @@ export interface RuntimeProviderAdapterRegistry {
 export interface ScriptedRuntimeProviderAdapterOptions {
   failure?: RuntimeProviderFailureMode
   stepDelayMs?: number
+  approvals?: ScriptedRuntimeApprovalStep[]
+}
+
+export interface ScriptedRuntimeApprovalStep {
+  action: string
+  message?: string
+  afterStep?: number
 }
 
 interface ScriptedRuntimeProviderDefinition {
@@ -111,6 +126,7 @@ class ScriptedRuntimeProviderProcess implements RuntimeProviderProcess {
 
   constructor(
     private readonly definition: ScriptedRuntimeProviderDefinition,
+    private readonly request: RuntimeProviderLaunchRequest,
     private readonly observer: RuntimeProviderObserver,
     options: ScriptedRuntimeProviderAdapterOptions,
   ) {
@@ -158,38 +174,57 @@ class ScriptedRuntimeProviderProcess implements RuntimeProviderProcess {
 
     this.timeout = setTimeout(() => {
       this.timeout = undefined
+      void this.runNextStep()
+    }, this.stepDelayMs)
+  }
 
-      if (this.stopped || this.paused) {
-        return
-      }
+  private async runNextStep() {
+    if (this.stopped || this.paused) {
+      return
+    }
 
-      const step = this.definition.steps[this.nextStepIndex]
-      if (!step) {
-        this.stop()
-        this.observer.onExit({
-          code: 0,
-          detail: this.definition.successDetail,
-        })
-        return
-      }
+    const step = this.definition.steps[this.nextStepIndex]
+    if (!step) {
+      this.stop()
+      this.observer.onExit({
+        code: 0,
+        detail: this.definition.successDetail,
+      })
+      return
+    }
 
-      this.nextStepIndex += 1
-      this.emittedSteps += 1
+    this.nextStepIndex += 1
+    this.emittedSteps += 1
 
+    try {
       if (step.kind === 'log') {
         this.observer.onLog(step.level, step.message)
-      } else {
+      } else if (step.kind === 'output') {
         this.observer.onOutput(step.stream, step.text)
+      } else {
+        await this.observer.onApprovalRequest(
+          createProviderApprovalRequest({
+            id: `approval-${randomUUID()}`,
+            sessionId: this.request.sessionId,
+            provider: this.request.provider,
+            action: step.action,
+            message: step.message,
+          }),
+        )
       }
+    } catch (error) {
+      this.stop()
+      this.observer.onFailure(error instanceof Error ? error : new Error('Unexpected provider failure.'))
+      return
+    }
 
-      if (this.failure?.phase === 'runtime' && this.emittedSteps >= (this.failure.afterSteps ?? 0)) {
-        this.stop()
-        this.observer.onFailure(new Error(this.failure.message))
-        return
-      }
+    if (this.failure?.phase === 'runtime' && this.emittedSteps >= (this.failure.afterSteps ?? 0)) {
+      this.stop()
+      this.observer.onFailure(new Error(this.failure.message))
+      return
+    }
 
-      this.scheduleNextStep()
-    }, this.stepDelayMs)
+    this.scheduleNextStep()
   }
 
   private clearTimeout() {
@@ -204,16 +239,71 @@ function createScriptedRuntimeProviderAdapter(
   definition: ScriptedRuntimeProviderDefinition,
   options: ScriptedRuntimeProviderAdapterOptions = {},
 ): RuntimeProviderAdapter {
+  const steps = insertApprovalSteps(definition.steps, options.approvals)
+
   return {
     kind: definition.kind,
-    launch(_request, observer) {
+    launch(request, observer) {
       if (options.failure?.phase === 'launch') {
         throw new Error(options.failure.message)
       }
 
-      return new ScriptedRuntimeProviderProcess(definition, observer, options)
+      return new ScriptedRuntimeProviderProcess(
+        {
+          ...definition,
+          steps: steps.map((step) => {
+            if (step.kind !== 'approval') {
+              return step
+            }
+
+            return {
+              ...step,
+              message: step.message.replace('{sessionId}', request.sessionId),
+            }
+          }),
+        },
+        request,
+        observer,
+        options,
+      )
     },
   }
+}
+
+function insertApprovalSteps(
+  steps: ScriptedRuntimeProviderDefinition['steps'],
+  approvals: ScriptedRuntimeApprovalStep[] = [],
+): ScriptedRuntimeProviderDefinition['steps'] {
+  if (approvals.length === 0) {
+    return [...steps]
+  }
+
+  const approvalMap = new Map<number, Array<ScriptedRuntimeProviderDefinition['steps'][number]>>()
+  for (const approval of approvals) {
+    const targetIndex = Math.max(0, Math.min(approval.afterStep ?? steps.length, steps.length))
+    const bucket = approvalMap.get(targetIndex) ?? []
+    bucket.push({
+      kind: 'approval',
+      action: approval.action,
+      message: approval.message ?? `Privileged action "${approval.action}" requires approval for session {sessionId}.`,
+    })
+    approvalMap.set(targetIndex, bucket)
+  }
+
+  const expandedSteps: ScriptedRuntimeProviderDefinition['steps'] = []
+  for (let index = 0; index <= steps.length; index += 1) {
+    const insertions = approvalMap.get(index)
+    if (insertions) {
+      expandedSteps.push(...insertions)
+    }
+
+    const currentStep = steps[index]
+    if (currentStep) {
+      expandedSteps.push(currentStep)
+    }
+  }
+
+  return expandedSteps
 }
 
 export function createClaudeCodeProviderAdapter(options?: ScriptedRuntimeProviderAdapterOptions): RuntimeProviderAdapter {
