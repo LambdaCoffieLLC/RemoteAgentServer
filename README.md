@@ -100,6 +100,8 @@ Use these connection settings in the web UI, Expo app, or desktop app:
 - server URL: `http://127.0.0.1:4318`
 - operator token: `operator-dev-token`
 
+The web client can opt in to browser notifications for approval-required, failed-session, and completed-session events. After sign-in, use the `Attention alerts` card to grant browser permission, mute categories independently, and click an alert to reopen the related session context.
+
 When using a physical phone, replace `127.0.0.1` with a reachable LAN address such as `http://192.168.1.15:4318`.
 
 ### Build And Verify
@@ -181,8 +183,9 @@ curl -sS http://127.0.0.1:4318/ports/detected-workspace-workspace-1-4173
 1. Open the web client, sign in, and confirm it shows the enrolled host, workspace, session, and the detected preview suggestion before you promote it.
 2. Open the Expo app, sign in with the same URL and token, and confirm it shows the host and live session state.
 3. Open the desktop app, sign in with the same URL and token, switch between the remote and local workspace tabs, start a session, and confirm approvals and forwarded previews appear in the same interface.
-4. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
-5. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
+4. In the web client, enable `Attention alerts`, confirm the browser permission prompt succeeds, and verify approval-required, session-failed, or session-completed alerts can be muted per category and reopen the related session when clicked.
+5. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
+6. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
 
 ### Clean Up The Smoke Test
 

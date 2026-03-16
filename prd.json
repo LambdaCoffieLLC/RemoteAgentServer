@@ -289,7 +289,9 @@
         "Users can mute or customize notification categories",
         "At least one supported client demonstrates end-to-end notification delivery in an automated test or documented smoke flow"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Implemented web-client browser notifications driven by the existing control-plane event stream in apps/web/src/app.ts, with explicit opt-in, per-category muting for approval-required, failed-session, and completed-session alerts, and hash-based session deep links when a browser alert is clicked. Documented the operator flow in README.md, including the manual smoke path for enabling alerts, and added product-owned end-to-end coverage in tests/web-notifications.test.ts while retaining compatibility with tests/web-client-smoke.test.ts. Verified with pnpm exec eslint apps/web/src/app.ts tests/web-notifications.test.ts tests/web-client-smoke.test.ts, pnpm exec tsc -p apps/web/tsconfig.json --noEmit, pnpm exec tsc -p tsconfig.json --noEmit, pnpm build, and pnpm run test:repo."
     },
     {
       "id": "US-019",

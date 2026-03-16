@@ -14,10 +14,45 @@ import {
 } from './client.js'
 
 const storageKey = 'remote-agent-server-web-connection-v1'
+const notificationPreferencesStorageKey =
+  'remote-agent-server-web-notifications-v1'
 const maxVisibleEvents = 16
 const diffPageSize = 28
 const reconnectDelayMs = 1500
 const recentHistoryLimit = 4
+const notificationCategories = [
+  'approval-required',
+  'session-failed',
+  'session-completed',
+] as const
+
+type WebNotificationCategory = (typeof notificationCategories)[number]
+
+interface BrowserNotificationPayload {
+  deepLink?: string
+  sessionId?: string
+}
+
+interface BrowserNotificationOptions {
+  body: string
+  data?: BrowserNotificationPayload
+  tag?: string
+}
+
+interface BrowserNotificationHandle {
+  close?: () => void
+  onclick: ((event?: Event) => void) | null
+}
+
+export interface BrowserNotificationApi {
+  getPermission(): NotificationPermission | 'unsupported'
+  isSupported(): boolean
+  requestPermission(): Promise<NotificationPermission>
+  show(
+    title: string,
+    options: BrowserNotificationOptions,
+  ): BrowserNotificationHandle | undefined
+}
 
 interface ConnectionSettings {
   baseUrl: string
@@ -42,6 +77,20 @@ interface ReviewState {
   error?: string
 }
 
+interface NotificationPreferences {
+  enabled: boolean
+  categories: Record<WebNotificationCategory, boolean>
+}
+
+interface AttentionNotification {
+  body: string
+  category: WebNotificationCategory
+  deepLink?: string
+  sessionId?: string
+  tag: string
+  title: string
+}
+
 interface WebClientState {
   connection?: ConnectionSettings
   dashboard?: DashboardData
@@ -54,10 +103,13 @@ interface WebClientState {
   review?: ReviewState
   approvalBusyId?: string
   portBusyId?: string
+  notificationPermission: NotificationPermission | 'unsupported'
+  notificationPreferences: NotificationPreferences
 }
 
 export interface RenderWebClientOptions {
   fetch?: typeof fetch
+  notifications?: BrowserNotificationApi
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 }
 
@@ -111,6 +163,174 @@ function formatHostConnection(host: HostRecord) {
 
 function formatOutputPreview(text: string) {
   return text.trim().replaceAll('\n', ' ')
+}
+
+function createDefaultNotificationPreferences(): NotificationPreferences {
+  return {
+    enabled: false,
+    categories: {
+      'approval-required': true,
+      'session-completed': true,
+      'session-failed': true,
+    },
+  }
+}
+
+function getNotificationCategoryLabel(category: WebNotificationCategory) {
+  switch (category) {
+    case 'approval-required':
+      return 'Approval required'
+    case 'session-completed':
+      return 'Completed sessions'
+    case 'session-failed':
+      return 'Failed sessions'
+  }
+}
+
+function getNotificationCategoryDescription(category: WebNotificationCategory) {
+  switch (category) {
+    case 'approval-required':
+      return 'Alert when a privileged action needs a decision.'
+    case 'session-completed':
+      return 'Alert when an agent run finishes successfully.'
+    case 'session-failed':
+      return 'Alert when a session exits with an error.'
+  }
+}
+
+function getSessionDeepLink(sessionId: string) {
+  return `#session=${encodeURIComponent(sessionId)}`
+}
+
+function readSessionIdFromHash() {
+  const hash = globalThis.location?.hash
+  if (!hash) {
+    return undefined
+  }
+
+  const params = new URLSearchParams(hash.replace(/^#/, ''))
+  const sessionId = params.get('session')
+  return sessionId && sessionId.trim().length > 0 ? sessionId : undefined
+}
+
+function writeSessionIdToHash(sessionId?: string) {
+  if (!globalThis.location) {
+    return
+  }
+
+  if (!sessionId) {
+    globalThis.history?.replaceState?.(
+      null,
+      '',
+      `${globalThis.location.pathname}${globalThis.location.search}`,
+    )
+    return
+  }
+
+  globalThis.location.hash = `session=${encodeURIComponent(sessionId)}`
+}
+
+function createDefaultBrowserNotificationApi(): BrowserNotificationApi {
+  return {
+    getPermission() {
+      return typeof Notification === 'undefined'
+        ? 'unsupported'
+        : Notification.permission
+    },
+    isSupported() {
+      return typeof Notification !== 'undefined'
+    },
+    async requestPermission() {
+      if (typeof Notification === 'undefined') {
+        return 'denied'
+      }
+
+      return await Notification.requestPermission()
+    },
+    show(title, options) {
+      if (typeof Notification === 'undefined') {
+        return undefined
+      }
+
+      const notification = new Notification(title, {
+        body: options.body,
+        data: options.data,
+        tag: options.tag,
+      })
+
+      let clickHandler: ((event?: Event) => void) | null = null
+
+      notification.onclick = (event) => {
+        clickHandler?.(event)
+      }
+
+      return {
+        close() {
+          notification.close()
+        },
+        get onclick() {
+          return clickHandler
+        },
+        set onclick(value) {
+          clickHandler = value
+        },
+      }
+    },
+  }
+}
+
+function createAttentionNotification(
+  event: ControlPlaneEventRecord,
+): AttentionNotification | undefined {
+  if (event.envelope.type === 'approval.requested') {
+    const approval = event.envelope.payload as ProviderApprovalRecord
+
+    return {
+      body: approval.message,
+      category: 'approval-required',
+      deepLink: getSessionDeepLink(approval.sessionId),
+      sessionId: approval.sessionId,
+      tag: `approval-${approval.id}`,
+      title: 'Approval required',
+    }
+  }
+
+  if (event.envelope.type !== 'session.state.changed') {
+    return undefined
+  }
+
+  const payload = event.envelope.payload as {
+    detail?: string
+    session?: SessionRecord
+  }
+  const session = payload.session
+  if (!session) {
+    return undefined
+  }
+
+  if (session.state === 'completed') {
+    return {
+      body: payload.detail ?? `${session.id} completed successfully.`,
+      category: 'session-completed',
+      deepLink: getSessionDeepLink(session.id),
+      sessionId: session.id,
+      tag: `session-completed-${session.id}`,
+      title: 'Session completed',
+    }
+  }
+
+  if (session.state === 'failed') {
+    return {
+      body: payload.detail ?? `${session.id} failed.`,
+      category: 'session-failed',
+      deepLink: getSessionDeepLink(session.id),
+      sessionId: session.id,
+      tag: `session-failed-${session.id}`,
+      title: 'Session failed',
+    }
+  }
+
+  return undefined
 }
 
 function renderCount(label: string, value: number) {
@@ -497,6 +717,28 @@ function renderEvents(events: ControlPlaneEventRecord[]) {
 
 function renderConnectionCard(state: WebClientState) {
   const connection = state.connection
+  const permissionLabel =
+    state.notificationPermission === 'unsupported'
+      ? 'unsupported'
+      : state.notificationPreferences.enabled
+        ? 'enabled'
+        : state.notificationPermission
+  const permissionTone =
+    state.notificationPermission === 'granted' && state.notificationPreferences.enabled
+      ? 'live'
+      : state.notificationPermission === 'denied'
+        ? 'error'
+        : 'disconnected'
+  const permissionCopy =
+    state.notificationPermission === 'unsupported'
+      ? 'Browser notifications are unavailable in this environment.'
+      : state.notificationPermission === 'granted'
+        ? state.notificationPreferences.enabled
+          ? 'Browser alerts are active for the selected categories.'
+          : 'Browser permission is granted. Alerts are currently muted.'
+        : state.notificationPermission === 'denied'
+          ? 'Browser permission is blocked. Re-enable notifications in the browser to use alerts.'
+          : 'Enable browser permission to receive approval, failure, and completion alerts.'
   return `
     <section class="surface-card connection-panel">
       <div>
@@ -528,6 +770,46 @@ function renderConnectionCard(state: WebClientState) {
       <div class="connection-meta">
         <span class="status-pill ${escapeHtml(state.streamStatus)}">${escapeHtml(state.streamStatus)}</span>
         ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ''}
+      </div>
+      <div class="notification-panel">
+        <div>
+          <p class="eyebrow">Attention alerts</p>
+          <h3>Browser notifications</h3>
+          <p class="minor-text">
+            Opt in on this browser, mute categories independently, and click alerts to reopen the related session context.
+          </p>
+        </div>
+        <div class="notification-actions">
+          <span class="status-pill ${escapeHtml(permissionTone)}">${escapeHtml(permissionLabel)}</span>
+          <button
+            class="${state.notificationPreferences.enabled ? 'ghost-button' : 'accent-button'}"
+            type="button"
+            data-action="toggle-browser-notifications"
+            ${state.notificationPermission === 'unsupported' ? 'disabled' : ''}
+          >
+            ${state.notificationPreferences.enabled ? 'Mute browser alerts' : 'Enable browser alerts'}
+          </button>
+        </div>
+        <p class="minor-text">${escapeHtml(permissionCopy)}</p>
+        <div class="notification-grid">
+          ${notificationCategories
+            .map(
+              (category) => `
+                <label class="notification-toggle">
+                  <input
+                    type="checkbox"
+                    data-action="toggle-notification-category"
+                    data-category="${escapeHtml(category)}"
+                    ${state.notificationPreferences.categories[category] ? 'checked' : ''}
+                    ${state.notificationPermission === 'unsupported' ? 'disabled' : ''}
+                  />
+                  <span>${escapeHtml(getNotificationCategoryLabel(category))}</span>
+                  <small>${escapeHtml(getNotificationCategoryDescription(category))}</small>
+                </label>
+              `,
+            )
+            .join('')}
+        </div>
       </div>
     </section>
   `
@@ -693,15 +975,68 @@ function clearStoredConnection(options?: RenderWebClientOptions) {
   safeStorage(options).removeItem(storageKey)
 }
 
+function readStoredNotificationPreferences(
+  options?: RenderWebClientOptions,
+): NotificationPreferences {
+  try {
+    const raw = safeStorage(options).getItem(notificationPreferencesStorageKey)
+    if (!raw) {
+      return createDefaultNotificationPreferences()
+    }
+
+    const parsed = JSON.parse(raw) as Partial<NotificationPreferences>
+    const defaults = createDefaultNotificationPreferences()
+
+    return {
+      enabled: parsed.enabled === true,
+      categories: {
+        'approval-required':
+          parsed.categories?.['approval-required'] ??
+          defaults.categories['approval-required'],
+        'session-completed':
+          parsed.categories?.['session-completed'] ??
+          defaults.categories['session-completed'],
+        'session-failed':
+          parsed.categories?.['session-failed'] ??
+          defaults.categories['session-failed'],
+      },
+    }
+  } catch {
+    return createDefaultNotificationPreferences()
+  }
+}
+
+function writeStoredNotificationPreferences(
+  preferences: NotificationPreferences,
+  options?: RenderWebClientOptions,
+) {
+  safeStorage(options).setItem(
+    notificationPreferencesStorageKey,
+    JSON.stringify(preferences),
+  )
+}
+
 export function renderWebClient(
   container: HTMLElement,
   options?: RenderWebClientOptions,
 ) {
+  const notificationApi =
+    options?.notifications ?? createDefaultBrowserNotificationApi()
+  const initialNotificationPermission = notificationApi.getPermission()
+  const initialNotificationPreferences = readStoredNotificationPreferences(options)
   const state: WebClientState = {
     connection: readStoredConnection(options),
     dashboard: undefined,
     events: [],
     loading: false,
+    notificationPermission: initialNotificationPermission,
+    notificationPreferences: {
+      ...initialNotificationPreferences,
+      enabled:
+        initialNotificationPermission === 'granted' &&
+        initialNotificationPreferences.enabled,
+    },
+    selectedSessionId: readSessionIdFromHash(),
     streamStatus: 'disconnected',
   }
   let client: ControlPlaneClient | undefined
@@ -709,6 +1044,59 @@ export function renderWebClient(
   let refreshTimer: ReturnType<typeof globalThis.setTimeout> | undefined
   let reconnectTimer: ReturnType<typeof globalThis.setTimeout> | undefined
   let destroyed = false
+  const onHashChange = () => {
+    state.selectedSessionId = readSessionIdFromHash()
+    render()
+  }
+
+  function writeNotificationPreferences(preferences: NotificationPreferences) {
+    state.notificationPreferences = preferences
+    writeStoredNotificationPreferences(preferences, options)
+  }
+
+  function selectSession(sessionId?: string) {
+    state.selectedSessionId = sessionId
+    writeSessionIdToHash(sessionId)
+  }
+
+  function openAttentionSession(attention: AttentionNotification) {
+    if (attention.sessionId) {
+      selectSession(attention.sessionId)
+      render()
+    }
+
+    globalThis.focus?.()
+  }
+
+  function maybeSendBrowserNotification(event: ControlPlaneEventRecord) {
+    const attention = createAttentionNotification(event)
+    if (!attention) {
+      return
+    }
+
+    if (
+      !state.notificationPreferences.enabled ||
+      state.notificationPermission !== 'granted' ||
+      !state.notificationPreferences.categories[attention.category]
+    ) {
+      return
+    }
+
+    const notification = notificationApi.show(attention.title, {
+      body: attention.body,
+      data: {
+        deepLink: attention.deepLink,
+        sessionId: attention.sessionId,
+      },
+      tag: attention.tag,
+    })
+
+    if (notification) {
+      notification.onclick = () => {
+        openAttentionSession(attention)
+      }
+    }
+  }
 
   function render() {
     container.innerHTML = renderAppShell(state)
@@ -749,7 +1137,7 @@ export function renderWebClient(
         state.selectedSessionId &&
         !sessions.some((session) => session.id === state.selectedSessionId)
       ) {
-        state.selectedSessionId = undefined
+        selectSession(undefined)
       }
     } catch (error) {
       state.error = error instanceof Error ? error.message : 'Failed to load data.'
@@ -798,6 +1186,7 @@ export function renderWebClient(
       state.lastEventId = event.id
       state.streamStatus = 'live'
       state.events = [event, ...state.events].slice(0, maxVisibleEvents)
+      maybeSendBrowserNotification(event)
       render()
 
       if (event.envelope.type !== 'control-plane.connected') {
@@ -849,9 +1238,47 @@ export function renderWebClient(
     state.events = []
     state.lastEventId = undefined
     state.review = undefined
-    state.selectedSessionId = undefined
+    state.selectedSessionId = readSessionIdFromHash()
     await refreshDashboard()
     connectEvents(state.connection)
+  }
+
+  async function toggleBrowserNotifications() {
+    if (!notificationApi.isSupported()) {
+      return
+    }
+
+    if (state.notificationPreferences.enabled) {
+      writeNotificationPreferences({
+        ...state.notificationPreferences,
+        enabled: false,
+      })
+      render()
+      return
+    }
+
+    const permission =
+      state.notificationPermission === 'granted'
+        ? 'granted'
+        : await notificationApi.requestPermission()
+    state.notificationPermission = permission
+
+    writeNotificationPreferences({
+      ...state.notificationPreferences,
+      enabled: permission === 'granted',
+    })
+    render()
+  }
+
+  function toggleNotificationCategory(category: WebNotificationCategory) {
+    writeNotificationPreferences({
+      ...state.notificationPreferences,
+      categories: {
+        ...state.notificationPreferences.categories,
+        [category]: !state.notificationPreferences.categories[category],
+      },
+    })
+    render()
   }
 
   async function loadReview(sessionId: string, path?: string, page = 1) {
@@ -983,7 +1410,7 @@ export function renderWebClient(
       client = undefined
       state.connection = undefined
       state.dashboard = undefined
-      state.selectedSessionId = undefined
+      selectSession(undefined)
       state.events = []
       state.review = undefined
       state.error = undefined
@@ -994,7 +1421,7 @@ export function renderWebClient(
     if (action === 'review-session') {
       const sessionId = actionButton.dataset.sessionId
       if (sessionId) {
-        state.selectedSessionId = sessionId
+        selectSession(sessionId)
         void loadReview(sessionId)
       }
       return
@@ -1003,7 +1430,7 @@ export function renderWebClient(
     if (action === 'resume-session') {
       const sessionId = actionButton.dataset.sessionId
       if (sessionId) {
-        state.selectedSessionId = sessionId
+        selectSession(sessionId)
         render()
       }
       return
@@ -1044,10 +1471,34 @@ export function renderWebClient(
       if (portId) {
         void promotePort(portId)
       }
+      return
+    }
+
+    if (action === 'toggle-browser-notifications') {
+      void toggleBrowserNotifications()
+    }
+  })
+
+  container.addEventListener('change', (event) => {
+    const target = event.target
+    if (!(target instanceof HTMLInputElement)) {
+      return
+    }
+
+    if (target.dataset.action !== 'toggle-notification-category') {
+      return
+    }
+
+    const category = target.dataset.category as
+      | WebNotificationCategory
+      | undefined
+    if (category && notificationCategories.includes(category)) {
+      toggleNotificationCategory(category)
     }
   })
 
   render()
+  globalThis.addEventListener?.('hashchange', onHashChange)
 
   if (state.connection) {
     void connect(state.connection)
@@ -1057,6 +1508,7 @@ export function renderWebClient(
     destroy() {
       destroyed = true
       stopEventStream()
+      globalThis.removeEventListener?.('hashchange', onHashChange)
       if (refreshTimer !== undefined) {
         globalThis.clearTimeout(refreshTimer)
       }
