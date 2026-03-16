@@ -1,11 +1,61 @@
 export type ProviderId = 'claude-code' | 'codex' | 'opencode'
 
 export type ProviderCapability = 'logs' | 'notifications' | 'approvals' | 'port-discovery'
+export type ProviderAdapterEventKind = 'status' | 'log' | 'output'
+export type ProviderAdapterEventStatus = 'running' | 'completed' | 'failed'
+export type ProviderAdapterLogLevel = 'debug' | 'info' | 'warn' | 'error'
+export type ProviderAdapterOutputStream = 'stdout' | 'stderr'
 
 export interface ProviderDescriptor {
   id: ProviderId
   displayName: string
   capabilities: ProviderCapability[]
+}
+
+export interface ProviderCommandSpec {
+  command: string
+  args: string[]
+  cwd: string
+  env?: Record<string, string | undefined>
+}
+
+export interface ProviderLaunchRequest {
+  sessionId: string
+  workspacePath: string
+  prompt: string
+  env?: Record<string, string | undefined>
+}
+
+export interface ProviderRuntimeIO {
+  stdout: Promise<string>
+  stderr: Promise<string>
+  exitCode: Promise<number | null>
+}
+
+export interface ProviderAdapterEvent {
+  kind: ProviderAdapterEventKind
+  message: string
+  status?: ProviderAdapterEventStatus
+  level?: ProviderAdapterLogLevel
+  stream?: ProviderAdapterOutputStream
+}
+
+export interface ProviderSessionHandle {
+  command: ProviderCommandSpec
+  // eslint-disable-next-line no-unused-vars
+  monitor: (runtime: ProviderRuntimeIO) => Promise<ProviderAdapterEvent[]>
+}
+
+export interface ProviderAdapter {
+  descriptor: ProviderDescriptor
+  // eslint-disable-next-line no-unused-vars
+  launchSession: (request: ProviderLaunchRequest) => Promise<ProviderSessionHandle>
+}
+
+export interface ProviderAdapterRegistry {
+  // eslint-disable-next-line no-unused-vars
+  get: (id: ProviderId) => ProviderAdapter | undefined
+  list: () => readonly ProviderAdapter[]
 }
 
 export const coreProviderDescriptors: readonly ProviderDescriptor[] = [
@@ -25,3 +75,16 @@ export const coreProviderDescriptors: readonly ProviderDescriptor[] = [
     capabilities: ['logs', 'notifications'],
   },
 ]
+
+export function createProviderAdapterRegistry(adapters: readonly ProviderAdapter[]): ProviderAdapterRegistry {
+  const adapterMap = new Map(adapters.map((adapter) => [adapter.descriptor.id, adapter]))
+
+  return {
+    get(id) {
+      return adapterMap.get(id)
+    },
+    list() {
+      return [...adapterMap.values()]
+    },
+  }
+}

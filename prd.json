@@ -109,7 +109,9 @@
         "OpenCode can be launched and monitored through the adapter interface",
         "Provider-specific failures are surfaced without crashing the session manager"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Added a shared provider adapter contract and registry helper in packages/providers/src/index.ts, then exposed it from apps/runtime/src/index.ts with a RuntimeSessionManager plus built-in Claude Code, Codex, and OpenCode adapters that launch provider commands, map stdout/stderr/status into shared session events, and contain provider-specific failures as failed session results instead of crashing the manager. Added .agents/ralph/tests/us-008-provider-adapters.test.ts coverage for the exported adapter surface, successful launch/monitor flows for all three providers, and failure isolation, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-009",

@@ -1,6 +1,8 @@
+import { spawn as spawnChildProcess } from 'node:child_process'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { hostname as getHostname } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { createForwardedPort } from '@remote-agent/ports'
 import {
   createManifest,
@@ -13,8 +15,28 @@ import {
   type SessionId,
   type WorkspaceId,
 } from '@remote-agent/protocol'
-import { coreProviderDescriptors } from '@remote-agent/providers'
-import { createSessionSummary } from '@remote-agent/sessions'
+import {
+  coreProviderDescriptors,
+  createProviderAdapterRegistry,
+  type ProviderAdapter,
+  type ProviderAdapterEvent,
+  type ProviderAdapterRegistry,
+  type ProviderCommandSpec,
+  type ProviderId,
+  type ProviderLaunchRequest,
+  type ProviderRuntimeIO,
+} from '@remote-agent/providers'
+import { createSessionEvent, createSessionSummary, type SessionEvent, type SessionLogLevel, type SessionSummary } from '@remote-agent/sessions'
+
+export { createProviderAdapterRegistry }
+export type {
+  ProviderAdapter,
+  ProviderAdapterEvent,
+  ProviderAdapterRegistry,
+  ProviderCommandSpec,
+  ProviderLaunchRequest,
+  ProviderRuntimeIO,
+} from '@remote-agent/providers'
 
 const hostId = 'host_runtime' as HostId
 const runtimeId = 'runtime_runtime' as RuntimeId
@@ -98,6 +120,44 @@ export interface RuntimeControlPlaneResponse {
   host: RuntimeControlPlaneHost
 }
 
+export interface CoreProviderCommandTemplate {
+  command: string
+  // eslint-disable-next-line no-unused-vars
+  args?: (request: ProviderLaunchRequest) => string[]
+  env?: Record<string, string | undefined>
+}
+
+export interface CoreProviderAdapterOptions {
+  commands?: Partial<Record<ProviderId, CoreProviderCommandTemplate>>
+}
+
+export interface RuntimeSessionManagerOptions {
+  clock?: () => IsoTimestamp
+  providerRegistry?: ProviderAdapterRegistry
+}
+
+export interface StartRuntimeSessionOptions {
+  id: SessionId
+  hostId: HostId
+  workspaceId: WorkspaceId
+  workspacePath: string
+  provider: ProviderId
+  prompt: string
+  requestedBy?: SessionSummary['requestedBy']
+  startedAt?: IsoTimestamp
+  env?: Record<string, string | undefined>
+}
+
+export interface RuntimeManagedSession {
+  session: SessionSummary
+  events: SessionEvent[]
+  command?: ProviderCommandSpec
+  failure?: {
+    provider: ProviderId
+    message: string
+  }
+}
+
 export function describeRuntimeApp() {
   const provider = coreProviderDescriptors.find(({ id }) => id === 'opencode') ?? coreProviderDescriptors[0]
 
@@ -139,6 +199,159 @@ export function describeRuntimeApp() {
       label: 'Runtime health endpoint',
     }),
   }
+}
+
+export class RuntimeSessionManager {
+  private readonly clock: () => IsoTimestamp
+
+  private readonly providerRegistry: ProviderAdapterRegistry
+
+  constructor(options: RuntimeSessionManagerOptions = {}) {
+    this.clock = options.clock ?? (() => new Date().toISOString())
+    this.providerRegistry = options.providerRegistry ?? createRuntimeProviderRegistry()
+  }
+
+  async startSession(options: StartRuntimeSessionOptions): Promise<RuntimeManagedSession> {
+    const adapter = this.providerRegistry.get(options.provider)
+
+    if (!adapter) {
+      throw new Error(`Provider adapter ${options.provider} is not registered.`)
+    }
+
+    let session = createSessionSummary({
+      id: options.id,
+      hostId: options.hostId,
+      workspaceId: options.workspaceId,
+      provider: options.provider,
+      requestedBy: options.requestedBy ?? {
+        id: 'runtime',
+        displayName: 'Runtime Agent',
+      },
+      status: 'running',
+      startedAt: options.startedAt ?? this.clock(),
+    })
+    const events: SessionEvent[] = [
+      createSessionEvent({
+        id: toRuntimeSessionEventId(options.id, 1),
+        sessionId: options.id,
+        sequence: 1,
+        kind: 'status',
+        createdAt: this.clock(),
+        status: 'running',
+        message: `Session started with provider ${options.provider}.`,
+      }),
+    ]
+
+    try {
+      const handle = await adapter.launchSession({
+        sessionId: options.id,
+        workspacePath: options.workspacePath,
+        prompt: options.prompt,
+        env: options.env,
+      })
+      const runtime = createProviderRuntimeIO(handle.command)
+      const adapterEvents = await handle.monitor(runtime)
+
+      for (const adapterEvent of adapterEvents) {
+        const sessionEvent = this.createSessionEventFromAdapter(options.id, events.length + 1, adapterEvent)
+        events.push(sessionEvent)
+
+        if (adapterEvent.kind === 'status' && adapterEvent.status) {
+          session = createSessionSummary({
+            ...session,
+            status: toSessionStatus(adapterEvent.status),
+          })
+        }
+      }
+
+      return {
+        session,
+        events,
+        command: handle.command,
+      }
+    } catch (error) {
+      const message = toErrorMessage(error)
+      events.push(
+        createSessionEvent({
+          id: toRuntimeSessionEventId(options.id, events.length + 1),
+          sessionId: options.id,
+          sequence: events.length + 1,
+          kind: 'log',
+          createdAt: this.clock(),
+          level: 'error',
+          message: `${adapter.descriptor.displayName} failed: ${message}`,
+        }),
+      )
+      events.push(
+        createSessionEvent({
+          id: toRuntimeSessionEventId(options.id, events.length + 1),
+          sessionId: options.id,
+          sequence: events.length + 1,
+          kind: 'status',
+          createdAt: this.clock(),
+          status: 'failed',
+          message: `Session failed with provider ${options.provider}.`,
+        }),
+      )
+      session = createSessionSummary({
+        ...session,
+        status: 'failed',
+      })
+
+      return {
+        session,
+        events,
+        failure: {
+          provider: options.provider,
+          message,
+        },
+      }
+    }
+  }
+
+  private createSessionEventFromAdapter(sessionId: SessionId, sequence: number, event: ProviderAdapterEvent): SessionEvent {
+    return createSessionEvent({
+      id: toRuntimeSessionEventId(sessionId, sequence),
+      sessionId,
+      sequence,
+      kind: event.kind,
+      createdAt: this.clock(),
+      message: event.message,
+      status: event.status ? toSessionStatus(event.status) : undefined,
+      level: event.level as SessionLogLevel | undefined,
+      stream: event.stream,
+    })
+  }
+}
+
+export function createRuntimeProviderRegistry(options: CoreProviderAdapterOptions = {}): ProviderAdapterRegistry {
+  return createProviderAdapterRegistry(createCoreProviderAdapters(options))
+}
+
+export function createCoreProviderAdapters(options: CoreProviderAdapterOptions = {}): readonly ProviderAdapter[] {
+  return coreProviderDescriptors.map((descriptor) => {
+    const template = options.commands?.[descriptor.id] ?? defaultProviderCommandTemplates[descriptor.id]
+
+    return {
+      descriptor,
+      async launchSession(request) {
+        return {
+          command: {
+            command: template.command,
+            args: template.args?.(request) ?? ['run', request.prompt],
+            cwd: request.workspacePath,
+            env: {
+              REMOTE_AGENT_PROVIDER: descriptor.id,
+              REMOTE_AGENT_SESSION_ID: request.sessionId,
+              ...template.env,
+              ...request.env,
+            },
+          },
+          monitor: async (runtime) => buildProcessMonitorEvents(descriptor.id, descriptor.displayName, runtime),
+        }
+      },
+    }
+  })
 }
 
 export async function installLinuxRuntime(options: LinuxRuntimeInstallOptions): Promise<LinuxRuntimeInstallResult> {
@@ -248,6 +461,111 @@ echo "This script is safe to rerun because existing runtime ids are reused from 
 `
 }
 
+const defaultProviderCommandTemplates: Record<ProviderId, CoreProviderCommandTemplate> = {
+  'claude-code': {
+    command: 'claude-code',
+  },
+  codex: {
+    command: 'codex',
+  },
+  opencode: {
+    command: 'opencode',
+  },
+}
+
+async function buildProcessMonitorEvents(
+  providerId: ProviderId,
+  displayName: string,
+  runtime: ProviderRuntimeIO,
+): Promise<ProviderAdapterEvent[]> {
+  const [stdout, stderr, exitCode] = await Promise.all([runtime.stdout, runtime.stderr, runtime.exitCode])
+  const events: ProviderAdapterEvent[] = []
+
+  for (const line of splitOutputLines(stdout)) {
+    events.push({
+      kind: 'output',
+      stream: 'stdout',
+      message: line,
+    })
+  }
+
+  for (const line of splitOutputLines(stderr)) {
+    events.push({
+      kind: 'output',
+      stream: 'stderr',
+      message: line,
+    })
+  }
+
+  if (exitCode === 0) {
+    events.push({
+      kind: 'status',
+      status: 'completed',
+      message: `${displayName} completed successfully.`,
+    })
+    return events
+  }
+
+  events.push({
+    kind: 'log',
+    level: 'error',
+    message: `${displayName} exited with code ${exitCode ?? 'unknown'}.`,
+  })
+  events.push({
+    kind: 'status',
+    status: 'failed',
+    message: `${displayName} session failed.`,
+  })
+
+  // This is intentionally unused for now, but keeps the provider id bound to the monitor surface.
+  void providerId
+
+  return events
+}
+
+function createProviderRuntimeIO(command: ProviderCommandSpec): ProviderRuntimeIO {
+  const child = spawnChildProcess(command.command, command.args, {
+    cwd: command.cwd,
+    env: {
+      ...process.env,
+      ...command.env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  return {
+    stdout: readProcessStream(child.stdout),
+    stderr: readProcessStream(child.stderr),
+    exitCode: waitForProcessExit(child),
+  }
+}
+
+async function readProcessStream(stream: Readable): Promise<string> {
+  let buffer = ''
+
+  for await (const chunk of stream) {
+    buffer += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+  }
+
+  return buffer
+}
+
+function waitForProcessExit(child: ReturnType<typeof spawnChildProcess>): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code) => {
+      resolve(code)
+    })
+  })
+}
+
+function splitOutputLines(value: string) {
+  return value
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+}
+
 function createRuntimeStatus(id: RuntimeId, version: string): RuntimeStatusSnapshot {
   return {
     runtimeId: id,
@@ -330,6 +648,30 @@ console.log(JSON.stringify({
   serverOrigin: runtimeConfig.serverOrigin,
 }, null, 2))
 `
+}
+
+function toRuntimeSessionEventId(sessionId: SessionId, sequence: number) {
+  return `session_event_${sessionId}_${sequence}` as const
+}
+
+function toSessionStatus(status: ProviderAdapterEvent['status']) {
+  if (status === 'completed') {
+    return 'completed' as const
+  }
+
+  if (status === 'failed') {
+    return 'failed' as const
+  }
+
+  return 'running' as const
+}
+
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message
+  }
+
+  return 'Unknown provider failure.'
 }
 
 function renderEnvironmentFile(config: InstalledLinuxRuntimeConfig) {
