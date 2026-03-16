@@ -91,6 +91,59 @@ async function waitForEvent(
   }
 }
 
+async function openEventStream(baseUrl: string, token: string, lastEventId?: string) {
+  const response = await fetch(`${baseUrl}/api/events`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'text/event-stream',
+      ...(lastEventId ? { 'last-event-id': lastEventId } : {}),
+    },
+  })
+
+  assert.equal(response.status, 200)
+  assert.ok(response.body)
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  return {
+    async nextEvent(predicate: (event: ControlPlaneEvent) => boolean) {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          throw new Error('Event stream closed before the expected event arrived.')
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+
+        let separatorIndex = buffer.indexOf('\n\n')
+        while (separatorIndex !== -1) {
+          const block = buffer.slice(0, separatorIndex)
+          buffer = buffer.slice(separatorIndex + 2)
+          separatorIndex = buffer.indexOf('\n\n')
+
+          const dataLine = block
+            .split('\n')
+            .find((line) => line.startsWith('data: '))
+
+          if (!dataLine) {
+            continue
+          }
+
+          const event = JSON.parse(dataLine.slice('data: '.length)) as ControlPlaneEvent
+          if (predicate(event)) {
+            return event
+          }
+        }
+      }
+    },
+    async close() {
+      await reader.cancel()
+    },
+  }
+}
+
 test('control plane rejects unauthorized access and accepts bootstrap host registration', async () => {
   const tempDir = await createTempDir()
   const server = await startControlPlaneServer({
@@ -171,38 +224,43 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
   })
 
   try {
+    const hostResponse = await fetch(`${firstServer.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('config-bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostResponse.status, 201)
+
+    const workspaceResponse = await fetch(`${firstServer.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('config-operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+        runtimeHostId: 'host-1',
+      }),
+    })
+    assert.equal(workspaceResponse.status, 201)
+
+    const sessionResponse = await fetch(`${firstServer.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('config-operator-secret'),
+      body: JSON.stringify({
+        id: 'session-1',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(sessionResponse.status, 201)
+
     const requests = [
-      fetch(`${firstServer.url}/api/hosts`, {
-        method: 'POST',
-        headers: bootstrapHeaders('config-bootstrap-secret'),
-        body: JSON.stringify({
-          id: 'host-1',
-          name: 'devbox',
-          platform: 'linux',
-          runtimeVersion: '0.1.0',
-          status: 'online',
-        }),
-      }),
-      fetch(`${firstServer.url}/api/workspaces`, {
-        method: 'POST',
-        headers: operatorHeaders('config-operator-secret'),
-        body: JSON.stringify({
-          id: 'workspace-1',
-          hostId: 'host-1',
-          path: repositoryPath,
-          runtimeHostId: 'host-1',
-        }),
-      }),
-      fetch(`${firstServer.url}/api/sessions`, {
-        method: 'POST',
-        headers: operatorHeaders('config-operator-secret'),
-        body: JSON.stringify({
-          id: 'session-1',
-          workspaceId: 'workspace-1',
-          provider: 'codex',
-          state: 'running',
-        }),
-      }),
       fetch(`${firstServer.url}/api/approvals`, {
         method: 'POST',
         headers: operatorHeaders('config-operator-secret'),
@@ -481,6 +539,167 @@ test('control plane delivers real-time SSE events for protected mutations', asyn
     const event = await eventPromise
     assert.equal(event.envelope.type, 'notification.created')
     assert.equal((event.envelope.payload as { id: string }).id, 'notification-1')
+  } finally {
+    await server.close()
+  }
+})
+
+test('control plane starts managed sessions, streams runtime events, supports pause resume cancel, and recovers state after reconnect', async () => {
+  const tempDir = await createTempDir()
+  const repositoryPath = await createGitRepository(tempDir, 'session-repo')
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile: join(tempDir, 'state.json'),
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+  })
+
+  try {
+    const hostRegistration = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostRegistration.status, 201)
+
+    const workspaceRegistration = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+      }),
+    })
+    assert.equal(workspaceRegistration.status, 201)
+
+    const firstStream = await openEventStream(server.url, 'operator-secret')
+    await firstStream.nextEvent((event) => event.envelope.type === 'session.snapshot')
+
+    const createSession = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-1',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(createSession.status, 201)
+    assert.equal(((await readJson(createSession)).data as { state: string }).state, 'queued')
+
+    const runningEvent = await firstStream.nextEvent((event) => {
+      return event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'running'
+    })
+    assert.equal(
+      (runningEvent.envelope.payload as { session: { state: string } }).session.state,
+      'running',
+    )
+
+    const logEvent = await firstStream.nextEvent((event) => {
+      return event.envelope.type === 'session.log' &&
+        (event.envelope.payload as { sessionId: string }).sessionId === 'session-1'
+    })
+    assert.equal((logEvent.envelope.payload as { sessionId: string }).sessionId, 'session-1')
+
+    const outputEvent = await firstStream.nextEvent((event) => {
+      return event.envelope.type === 'session.output' &&
+        (event.envelope.payload as { sessionId: string }).sessionId === 'session-1'
+    })
+    assert.equal((outputEvent.envelope.payload as { sessionId: string }).sessionId, 'session-1')
+
+    const pauseSession = await fetch(`${server.url}/api/sessions/session-1/pause`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+    })
+    assert.equal(pauseSession.status, 200)
+    assert.equal(((await readJson(pauseSession)).data as { state: string }).state, 'paused')
+
+    const pausedEvent = await firstStream.nextEvent((event) => {
+      return event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'paused'
+    })
+    assert.equal(
+      (pausedEvent.envelope.payload as { session: { state: string } }).session.state,
+      'paused',
+    )
+
+    const pausedSession = await fetch(`${server.url}/api/sessions/session-1`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(pausedSession.status, 200)
+    const pausedSessionState = (await readJson(pausedSession)).data as {
+      state: string
+      logs: unknown[]
+      output: unknown[]
+    }
+    assert.equal(pausedSessionState.state, 'paused')
+    assert.ok(pausedSessionState.logs.length >= 1)
+    assert.ok(pausedSessionState.output.length >= 1)
+
+    await firstStream.close()
+
+    const resumeSession = await fetch(`${server.url}/api/sessions/session-1/resume`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+    })
+    assert.equal(resumeSession.status, 200)
+    assert.equal(((await readJson(resumeSession)).data as { state: string }).state, 'running')
+
+    const replayStream = await openEventStream(server.url, 'operator-secret', pausedEvent.id)
+    const replayedRunningEvent = await replayStream.nextEvent((event) => {
+      return event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'running'
+    })
+    assert.equal(
+      (replayedRunningEvent.envelope.payload as { session: { state: string } }).session.state,
+      'running',
+    )
+
+    const cancelSession = await fetch(`${server.url}/api/sessions/session-1/cancel`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+    })
+    assert.equal(cancelSession.status, 200)
+    assert.equal(((await readJson(cancelSession)).data as { state: string }).state, 'canceled')
+
+    const canceledEvent = await replayStream.nextEvent((event) => {
+      return event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'canceled'
+    })
+    assert.equal(
+      (canceledEvent.envelope.payload as { session: { state: string } }).session.state,
+      'canceled',
+    )
+    await replayStream.close()
+
+    const canceledSession = await fetch(`${server.url}/api/sessions/session-1`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(canceledSession.status, 200)
+    const canceledSessionState = (await readJson(canceledSession)).data as {
+      state: string
+      logs: unknown[]
+      output: unknown[]
+    }
+    assert.equal(canceledSessionState.state, 'canceled')
+    assert.ok(canceledSessionState.logs.length >= 2)
+    assert.ok(canceledSessionState.output.length >= 1)
   } finally {
     await server.close()
   }

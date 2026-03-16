@@ -7,9 +7,20 @@ import { promisify } from 'node:util'
 import { createTokenCredential, type AuthHeaderName, type AuthPolicy, type AuthScheme } from '@remote-agent-server/auth'
 import { createManagedPort, type ManagedPort, type PortProtocol, type PortState, type PortVisibility } from '@remote-agent-server/ports'
 import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
-import { createProviderDescriptor } from '@remote-agent-server/providers'
-import { createRuntimeManifest } from '@remote-agent-server/runtime'
-import { createSessionDescriptor, type SessionDescriptor, type SessionMode, type SessionState } from '@remote-agent-server/sessions'
+import { createProviderDescriptor, providerKinds, type ProviderKind } from '@remote-agent-server/providers'
+import {
+  createRuntimeManifest,
+  createRuntimeSessionManager,
+  type RuntimeSessionHandle,
+} from '@remote-agent-server/runtime'
+import {
+  createSessionDescriptor,
+  type SessionDescriptor,
+  type SessionLogEntry,
+  type SessionMode,
+  type SessionOutputEntry,
+  type SessionState,
+} from '@remote-agent-server/sessions'
 import { fileURLToPath } from 'node:url'
 
 const defaultBindHost = '127.0.0.1'
@@ -41,8 +52,15 @@ export interface WorkspaceRecord {
 }
 
 export interface SessionRecord extends SessionDescriptor {
+  hostId: string
+  runtimeHostId: string
+  workspacePath: string
   createdAt: string
   updatedAt: string
+  startedAt?: string
+  completedAt?: string
+  logs: SessionLogEntry[]
+  output: SessionOutputEntry[]
 }
 
 export interface ApprovalRecord {
@@ -83,6 +101,11 @@ export interface ControlPlaneState {
 interface PersistedControlPlaneState extends ControlPlaneState {
   version: 1
 }
+
+type SessionMutableFields = Pick<
+  SessionRecord,
+  'state' | 'updatedAt' | 'startedAt' | 'completedAt' | 'logs' | 'output'
+>
 
 export interface ControlPlaneConfigFile {
   host?: string
@@ -332,11 +355,11 @@ function writeSseEvent(response: ServerResponse, event: ControlPlaneEvent) {
   response.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
-function createEvent(type: string, payload: unknown): ControlPlaneEvent {
+function createEvent(type: string, payload: unknown, origin: ProtocolEnvelope['origin'] = 'server'): ControlPlaneEvent {
   return {
     id: randomUUID(),
     timestamp: new Date().toISOString(),
-    envelope: createProtocolEnvelope(type, 'server', payload),
+    envelope: createProtocolEnvelope(type, origin, payload),
   }
 }
 
@@ -473,20 +496,31 @@ async function requireWorkspaceRecord(body: unknown, state: ControlPlaneState): 
   }
 }
 
-function requireSessionRecord(body: unknown): SessionRecord {
+function requireProviderKind(value: unknown, fieldName: string) {
+  return requireEnum(value, fieldName, providerKinds satisfies readonly ProviderKind[])
+}
+
+function requireSessionRecord(body: unknown, state: ControlPlaneState): SessionRecord {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
   }
 
   const timestamp = new Date().toISOString()
+  const workspaceId = requireString(record.workspaceId, 'workspaceId')
+  const workspace = state.workspaces.find((entry) => entry.id === workspaceId)
+  if (!workspace) {
+    throw new Error('"workspaceId" must reference a registered workspace.')
+  }
+
   const descriptor = createSessionDescriptor({
     id: requireString(record.id ?? `session-${randomUUID()}`, 'id'),
-    workspaceId: requireString(record.workspaceId, 'workspaceId'),
-    provider: requireString(record.provider, 'provider'),
+    workspaceId,
+    provider: requireProviderKind(record.provider, 'provider'),
     state: requireEnum(record.state ?? 'queued', 'state', [
       'queued',
       'running',
+      'paused',
       'blocked',
       'completed',
       'failed',
@@ -497,9 +531,46 @@ function requireSessionRecord(body: unknown): SessionRecord {
 
   return {
     ...descriptor,
+    hostId: workspace.hostId,
+    runtimeHostId: workspace.runtimeHostId,
+    workspacePath: workspace.path,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : timestamp,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
+    startedAt: requireOptionalString(record.startedAt, 'startedAt'),
+    completedAt: requireOptionalString(record.completedAt, 'completedAt'),
+    logs: Array.isArray(record.logs) ? (record.logs as SessionLogEntry[]) : [],
+    output: Array.isArray(record.output) ? (record.output as SessionOutputEntry[]) : [],
   }
+}
+
+function findSession(state: ControlPlaneState, sessionId: string) {
+  return state.sessions.find((entry) => entry.id === sessionId)
+}
+
+function requireSession(state: ControlPlaneState, sessionId: string) {
+  const session = findSession(state, sessionId)
+  if (!session) {
+    throw new Error(`Session "${sessionId}" was not found.`)
+  }
+
+  return session
+}
+
+function updateSession(state: ControlPlaneState, sessionId: string, update: SessionMutableFields) {
+  const index = state.sessions.findIndex((entry) => entry.id === sessionId)
+  if (index === -1) {
+    throw new Error(`Session "${sessionId}" was not found.`)
+  }
+
+  const current = state.sessions[index]
+  const next: SessionRecord = {
+    ...current,
+    ...update,
+    logs: [...update.logs],
+    output: [...update.output],
+  }
+  state.sessions[index] = next
+  return next
 }
 
 function requireApprovalRecord(body: unknown): ApprovalRecord {
@@ -594,8 +665,12 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
   const config = await resolveControlPlaneConfig(options)
   const state = await loadPersistedState(config.dataFile)
   const runtime = createRuntimeManifest('remote-control-plane-runtime')
+  const runtimeSessions = createRuntimeSessionManager()
   const clients = new Set<ServerResponse>()
+  const activeRuntimeHandles = new Map<string, RuntimeSessionHandle>()
+  const eventBacklog: ControlPlaneEvent[] = []
   let persistSequence = Promise.resolve()
+  const maxEventBacklog = 250
 
   function persistCurrentState() {
     const task = persistSequence.then(
@@ -606,12 +681,22 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     return task
   }
 
-  async function commit<TRecord>(
-    response: ServerResponse,
+  function broadcastEvent(event: ControlPlaneEvent) {
+    eventBacklog.push(event)
+    if (eventBacklog.length > maxEventBacklog) {
+      eventBacklog.shift()
+    }
+
+    for (const client of clients) {
+      writeSseEvent(client, event)
+    }
+  }
+
+  async function upsertAndBroadcast<TRecord>(
     record: TRecord,
     collectionName: keyof ControlPlaneState,
     eventType: string,
-    statusCode = 201,
+    origin: ProtocolEnvelope['origin'] = 'server',
   ) {
     const collection = state[collectionName] as TRecord[]
     if (Array.isArray(collection) && record && typeof record === 'object' && 'id' in (record as Record<string, unknown>)) {
@@ -622,12 +707,7 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
 
     await persistCurrentState()
 
-    const event = createEvent(eventType, record)
-    for (const client of clients) {
-      writeSseEvent(client, event)
-    }
-
-    sendJson(response, statusCode, { data: record })
+    broadcastEvent(createEvent(eventType, record, origin))
   }
 
   async function remove<TRecord extends { id: string }>(
@@ -645,13 +725,97 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     }
 
     await persistCurrentState()
-
-    const event = createEvent(eventType, removedRecord)
-    for (const client of clients) {
-      writeSseEvent(client, event)
-    }
+    broadcastEvent(createEvent(eventType, removedRecord))
 
     sendJson(response, 200, { data: removedRecord })
+  }
+
+  async function commit<TRecord>(
+    response: ServerResponse,
+    record: TRecord,
+    collectionName: keyof ControlPlaneState,
+    eventType: string,
+    statusCode = 201,
+    origin: ProtocolEnvelope['origin'] = 'server',
+  ) {
+    await upsertAndBroadcast(record, collectionName, eventType, origin)
+    sendJson(response, statusCode, { data: record })
+  }
+
+  async function persistSessionSnapshot(snapshot: ReturnType<RuntimeSessionHandle['getSnapshot']>) {
+    const record = updateSession(state, snapshot.session.id, {
+      state: snapshot.session.state,
+      updatedAt: snapshot.updatedAt,
+      startedAt: snapshot.startedAt,
+      completedAt: snapshot.completedAt,
+      logs: snapshot.logs,
+      output: snapshot.output,
+    })
+
+    await persistCurrentState()
+    return record
+  }
+
+  function attachRuntimeSession(handle: RuntimeSessionHandle) {
+    activeRuntimeHandles.set(handle.id, handle)
+    const unsubscribe = handle.subscribe((event) => {
+      void (async () => {
+        const record = await persistSessionSnapshot(handle.getSnapshot())
+        broadcastEvent(createEvent(event.type, { session: record, ...(event.payload as Record<string, unknown>) }, 'runtime'))
+
+        if (record.state === 'completed' || record.state === 'failed' || record.state === 'canceled') {
+          activeRuntimeHandles.delete(record.id)
+          unsubscribe()
+        }
+      })()
+    })
+  }
+
+  async function startManagedSession(body: unknown) {
+    const candidate = requireSessionRecord(body, state)
+    if (findSession(state, candidate.id)) {
+      throw new Error(`Session "${candidate.id}" already exists.`)
+    }
+
+    const session: SessionRecord = {
+      ...candidate,
+      state: 'queued',
+      updatedAt: candidate.createdAt,
+      startedAt: undefined,
+      completedAt: undefined,
+      logs: [],
+      output: [],
+    }
+    await upsertAndBroadcast(session, 'sessions', 'session.upserted')
+
+    const handle = runtimeSessions.startSession({
+      sessionId: session.id,
+      workspaceId: session.workspaceId,
+      workspacePath: session.workspacePath,
+      provider: session.provider as ProviderKind,
+      mode: session.mode,
+    })
+    attachRuntimeSession(handle)
+
+    return session
+  }
+
+  async function controlSession(sessionId: string, action: 'pause' | 'resume' | 'cancel') {
+    requireSession(state, sessionId)
+    const handle = activeRuntimeHandles.get(sessionId) ?? runtimeSessions.getSession(sessionId)
+    if (!handle) {
+      throw new Error(`Session "${sessionId}" is not active in the runtime.`)
+    }
+
+    if (action === 'pause') {
+      handle.pause()
+    } else if (action === 'resume') {
+      handle.resume()
+    } else {
+      handle.cancel()
+    }
+
+    return await persistSessionSnapshot(handle.getSnapshot())
   }
 
   const server = createServer(async (request, response) => {
@@ -687,6 +851,7 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         })
 
         clients.add(response)
+        const replayFrom = request.headers['last-event-id']?.toString()
         writeSseEvent(
           response,
           createEvent('control-plane.connected', {
@@ -701,6 +866,29 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
             },
           }),
         )
+
+        if (replayFrom) {
+          const replayIndex = eventBacklog.findIndex((event) => event.id === replayFrom)
+          if (replayIndex !== -1) {
+            for (const event of eventBacklog.slice(replayIndex + 1)) {
+              writeSseEvent(response, event)
+            }
+          } else {
+            writeSseEvent(
+              response,
+              createEvent('session.snapshot', {
+                active: state.sessions.filter((entry) => !['completed', 'failed', 'canceled'].includes(entry.state)),
+              }),
+            )
+          }
+        } else {
+          writeSseEvent(
+            response,
+            createEvent('session.snapshot', {
+              active: state.sessions.filter((entry) => !['completed', 'failed', 'canceled'].includes(entry.state)),
+            }),
+          )
+        }
 
         request.on('close', () => {
           clients.delete(response)
@@ -764,8 +952,30 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'POST' && pathname === '/api/sessions') {
-        const session = requireSessionRecord(await readJsonBody(request))
-        await commit(response, session, 'sessions', 'session.upserted')
+        const session = await startManagedSession(await readJsonBody(request))
+        sendJson(response, 201, { data: session })
+        return
+      }
+
+      const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/)
+      if (request.method === 'GET' && sessionMatch) {
+        const session = findSession(state, sessionMatch[1])
+        if (!session) {
+          notFound(response)
+          return
+        }
+
+        sendJson(response, 200, { data: session })
+        return
+      }
+
+      const sessionControlMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/(pause|resume|cancel)$/)
+      if (request.method === 'POST' && sessionControlMatch) {
+        const session = await controlSession(
+          sessionControlMatch[1],
+          sessionControlMatch[2] as 'pause' | 'resume' | 'cancel',
+        )
+        sendJson(response, 200, { data: session })
         return
       }
 
@@ -851,6 +1061,7 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       return cloneState(state)
     },
     async close() {
+      runtimeSessions.dispose()
       for (const client of clients) {
         client.end()
       }

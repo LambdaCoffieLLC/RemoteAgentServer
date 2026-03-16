@@ -115,7 +115,9 @@
         "Disconnected clients can reconnect and recover active session state",
         "The core session lifecycle has integration coverage across the server and runtime boundary"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a managed session lifecycle across packages/runtime and apps/server so POST /api/sessions now validates a registered workspace/provider, starts an in-process runtime session, persists recoverable session state with logs and output history, and exposes GET /api/sessions/:id plus POST /api/sessions/:id/{pause,resume,cancel}. Extended SSE delivery at /api/events to stream runtime-originated session.state.changed, session.log, and session.output events, emit session snapshots for reconnecting clients, and replay missed events with Last-Event-ID. Documented the lifecycle API and manual smoke flow in README.md, and added integration coverage in tests/server-control-plane.test.ts for start, live monitoring, pause, reconnect recovery, resume, and cancel across the server/runtime boundary. Verified with pnpm verify."
     },
     {
       "id": "US-008",

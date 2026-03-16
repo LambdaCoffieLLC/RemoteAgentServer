@@ -25,7 +25,7 @@ The server app at `apps/server` is now a runnable control plane for the single-u
 
 - hosts at `/api/hosts`
 - workspaces at `/api/workspaces` and `/api/workspaces/:id`
-- sessions at `/api/sessions`
+- sessions at `/api/sessions`, `/api/sessions/:id`, and `/api/sessions/:id/{pause,resume,cancel}`
 - approvals at `/api/approvals`
 - notifications at `/api/notifications`
 - forwarded ports at `/api/ports`
@@ -156,9 +156,28 @@ Managed workspaces are registered through `POST /api/workspaces`. The control pl
 
 Workspace registration fails with a clear `400` error when the host is unknown, the path is inaccessible, or the target path is not a git repository. Operators can list workspaces with `GET /api/workspaces`, inspect one with `GET /api/workspaces/<workspace-id>`, and remove one with `DELETE /api/workspaces/<workspace-id>`.
 
+### Session Lifecycle
+
+Managed coding sessions are started through `POST /api/sessions` with:
+
+- `workspaceId`: an existing registered workspace
+- `provider`: one of `claude-code`, `codex`, or `opencode`
+- `id`: optional, otherwise the control plane generates one
+- `mode`: optional, defaults to `workspace`
+
+The control plane starts the session against the workspace's runtime host, persists recoverable session state, and streams live runtime-originated events over `GET /api/events`:
+
+- `session.upserted` when the session record is created
+- `session.state.changed` for `queued`, `running`, `paused`, `completed`, `failed`, and `canceled`
+- `session.log` for structured runtime log lines
+- `session.output` for stdout or stderr chunks
+- `session.snapshot` on a fresh SSE connection so reconnecting clients can recover active session state
+
+Clients can inspect the current recoverable session state, including accumulated logs and output, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
+
 ### Manual Smoke Test
 
-Start the server, then register a host with the bootstrap token, register the current checkout as a workspace, inspect it, and remove it with the operator token:
+Start the server, then register a host with the bootstrap token, register the current checkout as a workspace, start a session, monitor it over SSE, and exercise pause, resume, cancel, and recovery with the operator token:
 
 ```bash
 REPO_PATH=$(pwd)
@@ -187,13 +206,40 @@ curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/workspaces/workspace-1
 
-curl -sS -X DELETE \
-  -H 'Authorization: Bearer operator-dev-token' \
-  http://127.0.0.1:4318/api/workspaces/workspace-1
-
 curl -N \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/events
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"id":"session-1","workspaceId":"workspace-1","provider":"codex"}' \
+  http://127.0.0.1:4318/api/sessions
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/sessions/session-1
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/sessions/session-1/pause
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/sessions/session-1/resume
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/sessions/session-1/cancel
+
+curl -N \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'Last-Event-ID: <event-id-from-earlier-stream>' \
+  http://127.0.0.1:4318/api/events
+
+curl -sS -X DELETE \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/workspaces/workspace-1
 ```
 
 ## Workspace Layout
