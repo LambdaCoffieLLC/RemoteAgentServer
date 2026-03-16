@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import {
   access,
   mkdir,
@@ -85,6 +85,134 @@ async function createPreviewServer() {
 
           resolveClose()
         })
+      })
+    },
+  }
+}
+
+async function findAvailablePort(candidates: number[]) {
+  for (const candidate of candidates) {
+    const server = createHttpServer()
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(candidate, '127.0.0.1', () => {
+          server.off('error', rejectListen)
+          resolveListen()
+        })
+      })
+
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error)
+            return
+          }
+
+          resolveClose()
+        })
+      })
+
+      return candidate
+    } catch {
+      server.close()
+    }
+  }
+
+  throw new Error('Failed to reserve a common development port for the detection test.')
+}
+
+function getExpectedDetectedLabel(port: number) {
+  switch (port) {
+    case 4173:
+      return 'Vite preview'
+    case 4321:
+      return 'Storybook'
+    case 5173:
+      return 'Vite dev server'
+    case 8787:
+      return 'Wrangler dev server'
+    default:
+      return `Detected port ${port}`
+  }
+}
+
+async function startWorkspaceDevelopmentServer(
+  workspacePath: string,
+  port: number,
+) {
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `
+        import { createServer } from 'node:http'
+        const server = createServer((request, response) => {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          response.end('detected-preview:' + (request.url ?? '/'))
+        })
+        server.listen(${port}, '127.0.0.1', () => {
+          process.stdout.write('ready\\n')
+        })
+        process.on('SIGTERM', () => {
+          server.close(() => process.exit(0))
+        })
+      `,
+    ],
+    {
+      cwd: workspacePath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+
+  await new Promise<void>((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      child.kill('SIGTERM')
+      rejectReady(new Error('Timed out while waiting for the detected dev server to start.'))
+    }, 5000)
+
+    function cleanup() {
+      clearTimeout(timeout)
+      child.stdout?.off('data', onStdout)
+      child.stderr?.off('data', onStderr)
+      child.off('exit', onExit)
+    }
+
+    function onStdout(chunk: Buffer) {
+      if (chunk.toString('utf8').includes('ready')) {
+        cleanup()
+        resolveReady()
+      }
+    }
+
+    function onStderr(chunk: Buffer) {
+      cleanup()
+      rejectReady(new Error(`Detected dev server failed to start: ${chunk.toString('utf8').trim()}`))
+    }
+
+    function onExit(code: number | null) {
+      cleanup()
+      rejectReady(new Error(`Detected dev server exited before startup with code ${code}.`))
+    }
+
+    child.stdout?.on('data', onStdout)
+    child.stderr?.on('data', onStderr)
+    child.once('exit', onExit)
+  })
+
+  return {
+    port,
+    async close() {
+      if (child.exitCode !== null) {
+        return
+      }
+
+      child.kill('SIGTERM')
+      await new Promise<void>((resolveClose) => {
+        child.once('exit', () => resolveClose())
       })
     },
   }
@@ -941,6 +1069,156 @@ test('control plane forwards ports with filtered active listings, managed URLs, 
   } finally {
     await server.close()
     await previewServer.close()
+  }
+})
+
+test('control plane auto-detects common development ports and promotes them into managed forwards', async () => {
+  const tempDir = await createTempDir()
+  const dataFile = join(tempDir, 'state.json')
+  const repositoryPath = await createGitRepository(tempDir)
+  const detectedPortNumber = await findAvailablePort([5173, 4173, 8787, 4321])
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile,
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+    runtimeProviderAdapters: [
+      createCodexProviderAdapter({
+        stepDelayMs: 300,
+      }),
+    ],
+  })
+
+  const detectedServer = await startWorkspaceDevelopmentServer(
+    repositoryPath,
+    detectedPortNumber,
+  )
+
+  try {
+    const hostResponse = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostResponse.status, 201)
+
+    const workspaceResponse = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+        runtimeHostId: 'host-1',
+      }),
+    })
+    assert.equal(workspaceResponse.status, 201)
+
+    const sessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-1',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(sessionResponse.status, 201)
+
+    const detectedPort = await waitFor(async () => {
+      const detectedResponse = await fetch(
+        `${server.url}/api/ports?sessionId=session-1&includeDetected=true`,
+        {
+          headers: {
+            authorization: 'Bearer operator-secret',
+          },
+        },
+      )
+      assert.equal(detectedResponse.status, 200)
+      const detectedPorts = (await readJson(detectedResponse)).data as Array<{
+        id: string
+        port: number
+        state: string
+        sessionId?: string
+        workspaceId?: string
+        label: string
+        managedUrl?: string
+      }>
+      const match = detectedPorts.find((entry) => entry.port === detectedPortNumber)
+      assert.ok(match)
+      assert.equal(match.state, 'detected')
+      assert.equal(match.sessionId, 'session-1')
+      assert.equal(match.workspaceId, 'workspace-1')
+      assert.equal(match.label, getExpectedDetectedLabel(detectedPortNumber))
+      assert.equal(match.managedUrl, undefined)
+      return match
+    })
+
+    const promotedResponse = await fetch(
+      `${server.url}/api/ports/${detectedPort.id}/open`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({
+          visibility: 'shared',
+        }),
+      },
+    )
+    assert.equal(promotedResponse.status, 200)
+    const promotedPort = (await readJson(promotedResponse)).data as {
+      id: string
+      state: string
+      forwardingState: string
+      visibility: string
+      sessionId?: string
+      workspaceId?: string
+      managedUrl?: string
+    }
+    assert.equal(promotedPort.id, detectedPort.id)
+    assert.equal(promotedPort.state, 'forwarded')
+    assert.equal(promotedPort.forwardingState, 'open')
+    assert.equal(promotedPort.visibility, 'shared')
+    assert.equal(promotedPort.sessionId, 'session-1')
+    assert.equal(promotedPort.workspaceId, 'workspace-1')
+    assert.equal(typeof promotedPort.managedUrl, 'string')
+
+    const promotedManagedUrlResponse = await fetch(
+      `${promotedPort.managedUrl}/preview`,
+    )
+    assert.equal(promotedManagedUrlResponse.status, 200)
+    assert.equal(
+      await promotedManagedUrlResponse.text(),
+      'detected-preview:/preview',
+    )
+
+    const forwardedPortsResponse = await fetch(
+      `${server.url}/api/ports?sessionId=session-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(forwardedPortsResponse.status, 200)
+    const forwardedPorts = (await readJson(forwardedPortsResponse)).data as Array<{
+      id: string
+      state: string
+    }>
+    assert.equal(
+      forwardedPorts.some(
+        (entry) => entry.id === detectedPort.id && entry.state === 'forwarded',
+      ),
+      true,
+    )
+  } finally {
+    await detectedServer.close()
+    await server.close()
   }
 })
 

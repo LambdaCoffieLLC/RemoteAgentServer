@@ -13,7 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import {
   createTokenCredential,
@@ -50,6 +50,7 @@ import {
   createRuntimeManifest,
   createRuntimeStatusReport,
   createRuntimeSessionManager,
+  detectListeningDevelopmentPorts,
   type RuntimeProviderAdapter,
   type RuntimeProviderAdapterRegistry,
   type RuntimeConnectionMode,
@@ -68,6 +69,7 @@ import {
   type SessionOutputEntry,
   type SessionState,
   type SessionWorktreeMetadata,
+  isTerminalSessionState,
 } from '@remote-agent-server/sessions'
 import { fileURLToPath } from 'node:url'
 
@@ -1840,6 +1842,167 @@ export async function startControlPlaneServer(
     return record
   }
 
+  function isPathWithinRoot(rootPath: string, candidatePath: string) {
+    return (
+      candidatePath === rootPath ||
+      candidatePath.startsWith(`${rootPath}${sep}`)
+    )
+  }
+
+  function createDetectedPortId(
+    scopeType: 'workspace' | 'session',
+    scopeId: string,
+    port: number,
+  ) {
+    return `detected-${scopeType}-${scopeId}-${port}`
+  }
+
+  function matchDetectedWorkspace(
+    candidatePath: string,
+    scope: { hostId?: string; workspaceId?: string; sessionId?: string },
+  ) {
+    const matchingWorkspaces = state.workspaces
+      .filter((workspace) => (scope.hostId ? workspace.hostId === scope.hostId : true))
+      .filter((workspace) =>
+        scope.workspaceId ? workspace.id === scope.workspaceId : true,
+      )
+      .filter((workspace) => isPathWithinRoot(workspace.path, candidatePath))
+      .sort((left, right) => right.path.length - left.path.length)
+
+    return matchingWorkspaces[0]
+  }
+
+  function matchDetectedSession(
+    candidatePath: string,
+    scope: { hostId?: string; workspaceId?: string; sessionId?: string },
+  ) {
+    const matchingSessions = state.sessions
+      .filter((session) => !isTerminalSessionState(session.state))
+      .filter((session) => (scope.hostId ? session.hostId === scope.hostId : true))
+      .filter((session) =>
+        scope.workspaceId ? session.workspaceId === scope.workspaceId : true,
+      )
+      .filter((session) => (scope.sessionId ? session.id === scope.sessionId : true))
+      .filter((session) => isPathWithinRoot(session.executionPath, candidatePath))
+      .sort((left, right) => right.executionPath.length - left.executionPath.length)
+
+    return matchingSessions[0]
+  }
+
+  async function listAutoDetectedPorts(scope: {
+    hostId?: string
+    workspaceId?: string
+    sessionId?: string
+  }) {
+    const listeners = await detectListeningDevelopmentPorts()
+    const detectedPorts = new Map<string, ForwardedPortRecord>()
+
+    for (const listener of listeners) {
+      if (!listener.cwd) {
+        continue
+      }
+
+      const session =
+        scope.workspaceId && scope.sessionId === undefined
+          ? undefined
+          : matchDetectedSession(listener.cwd, scope)
+      const workspace =
+        session === undefined
+          ? scope.sessionId === undefined
+            ? matchDetectedWorkspace(listener.cwd, scope)
+            : undefined
+          : state.workspaces.find((entry) => entry.id === session.workspaceId)
+      if (!workspace) {
+        continue
+      }
+
+      const hostId = session?.hostId ?? workspace.hostId
+      const record = getForwardedPortSnapshot({
+        ...createManagedPort({
+          id: createDetectedPortId(
+            session ? 'session' : 'workspace',
+            session?.id ?? workspace.id,
+            listener.port,
+          ),
+          port: listener.port,
+          protocol: listener.protocol,
+          visibility: 'private',
+          state: 'detected',
+        }),
+        hostId,
+        workspaceId: workspace.id,
+        sessionId: session?.id,
+        label: listener.suggestedLabel ?? `Detected port ${listener.port}`,
+        targetHost: listener.host,
+        createdAt: new Date().toISOString(),
+        openedAt: undefined,
+        closedAt: undefined,
+      })
+
+      detectedPorts.set(record.id, record)
+    }
+
+    return [...detectedPorts.values()].sort(
+      (left, right) => left.port - right.port || left.label.localeCompare(right.label),
+    )
+  }
+
+  async function resolveDetectedPort(portId: string) {
+    const sessionMatch = portId.match(/^detected-session-(.+)-(\d+)$/)
+    if (sessionMatch) {
+      const autoDetectedPorts = await listAutoDetectedPorts({
+        sessionId: sessionMatch[1],
+      })
+      return autoDetectedPorts.find((record) => record.id === portId)
+    }
+
+    const workspaceMatch = portId.match(/^detected-workspace-(.+)-(\d+)$/)
+    if (workspaceMatch) {
+      const autoDetectedPorts = await listAutoDetectedPorts({
+        workspaceId: workspaceMatch[1],
+      })
+      return autoDetectedPorts.find((record) => record.id === portId)
+    }
+
+    const autoDetectedPorts = await listAutoDetectedPorts({})
+    return autoDetectedPorts.find((record) => record.id === portId)
+  }
+
+  async function promoteDetectedPort(port: ForwardedPortRecord, body: unknown) {
+    const payload = asRecord(body)
+    const openedAt = new Date().toISOString()
+    const visibility =
+      payload && 'visibility' in payload
+        ? requireEnum(payload.visibility, 'visibility', [
+            'private',
+            'shared',
+          ] satisfies readonly PortVisibility[])
+        : port.visibility
+    const label =
+      payload && 'label' in payload
+        ? requireString(payload.label, 'label')
+        : port.label
+    const expiresAt =
+      payload && 'expiresAt' in payload
+        ? requireOptionalTimestampString(payload.expiresAt, 'expiresAt')
+        : undefined
+
+    const promoted = getForwardedPortSnapshot({
+      ...port,
+      label,
+      visibility,
+      state: 'forwarded',
+      forwardingState: 'open',
+      openedAt,
+      closedAt: undefined,
+      expiredAt: undefined,
+      expiresAt,
+    })
+
+    await upsertAndBroadcast(promoted, 'forwardedPorts', 'port.promoted')
+    return promoted
+  }
+
   async function expireForwardedPorts(portIds?: string[]) {
     const now = Date.now()
     const timestamp = new Date(now).toISOString()
@@ -2055,9 +2218,18 @@ export async function startControlPlaneServer(
 
   async function openForwardedPort(portId: string, body: unknown) {
     await expireForwardedPorts([portId])
-    const current = requireForwardedPort(portId)
-    if (current.state !== 'forwarded') {
-      throw new Error(`Port "${portId}" is not a forwarded port.`)
+    const current = findForwardedPort(portId)
+    if (!current) {
+      const detected = await resolveDetectedPort(portId)
+      if (!detected) {
+        throw new Error(`Port "${portId}" was not found.`)
+      }
+
+      return await promoteDetectedPort(detected, body)
+    }
+
+    if (current.state === 'detected') {
+      return await promoteDetectedPort(current, body)
     }
 
     const payload = asRecord(body)
@@ -2555,7 +2727,7 @@ export async function startControlPlaneServer(
         const workspaceId = url.searchParams.get('workspaceId') ?? undefined
         const sessionId = url.searchParams.get('sessionId') ?? undefined
         const hostId = url.searchParams.get('hostId') ?? undefined
-        const ports = state.forwardedPorts
+        const persistedPorts = state.forwardedPorts
           .map((record) => getForwardedPortSnapshot(record))
           .filter((record) =>
             includeDetected ? true : record.state === 'forwarded',
@@ -2572,6 +2744,19 @@ export async function startControlPlaneServer(
               ? true
               : record.state === 'detected' || record.forwardingState === 'open',
           )
+        const autoDetectedPorts = includeDetected
+          ? await listAutoDetectedPorts({
+              hostId,
+              workspaceId,
+              sessionId,
+            })
+          : []
+        const ports = [
+          ...persistedPorts,
+          ...autoDetectedPorts.filter(
+            (record) => !persistedPorts.some((entry) => entry.id === record.id),
+          ),
+        ]
 
         sendJson(response, 200, { data: ports })
         return

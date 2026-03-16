@@ -53,6 +53,7 @@ interface WebClientState {
   error?: string
   review?: ReviewState
   approvalBusyId?: string
+  portBusyId?: string
 }
 
 export interface RenderWebClientOptions {
@@ -366,7 +367,7 @@ function renderPortCard(port: ForwardedPortRecord) {
   `
 }
 
-function renderDetectedPortCard(port: ForwardedPortRecord) {
+function renderDetectedPortCard(port: ForwardedPortRecord, busyId?: string) {
   return `
     <article class="surface-card port-card detected-port">
       <header class="inventory-header">
@@ -381,6 +382,16 @@ function renderDetectedPortCard(port: ForwardedPortRecord) {
         <div><dt>Scope</dt><dd>${escapeHtml(port.sessionId ?? port.workspaceId ?? port.hostId)}</dd></div>
       </dl>
       <p class="minor-text">Detected only. Not externally exposed until promoted to a managed forward.</p>
+      <div class="card-actions">
+        <button
+          class="accent-button"
+          data-action="promote-port"
+          data-port-id="${escapeHtml(port.id)}"
+          ${busyId === port.id ? 'disabled' : ''}
+        >
+          ${busyId === port.id ? 'Opening…' : 'Open forward'}
+        </button>
+      </div>
     </article>
   `
 }
@@ -629,7 +640,9 @@ function renderAppShell(state: WebClientState) {
             ${
               detectedPorts.length === 0
                 ? '<p class="empty-state">No detected ports are visible.</p>'
-                : detectedPorts.map((port) => renderDetectedPortCard(port)).join('')
+                : detectedPorts
+                    .map((port) => renderDetectedPortCard(port, state.portBusyId))
+                    .join('')
             }
           </div>
         </article>
@@ -902,6 +915,26 @@ export function renderWebClient(
     }
   }
 
+  async function promotePort(portId: string) {
+    if (!client) {
+      return
+    }
+
+    state.portBusyId = portId
+    render()
+
+    try {
+      await client.openPort(portId)
+      await refreshDashboard()
+    } catch (error) {
+      state.error =
+        error instanceof Error ? error.message : 'Failed to open the detected port.'
+    } finally {
+      state.portBusyId = undefined
+      render()
+    }
+  }
+
   container.addEventListener('submit', (event) => {
     const target = event.target
     if (!(target instanceof HTMLFormElement)) {
@@ -1002,6 +1035,14 @@ export function renderWebClient(
         (status === 'approved' || status === 'rejected')
       ) {
         void decideApproval(approvalId, status)
+      }
+      return
+    }
+
+    if (action === 'promote-port') {
+      const portId = actionButton.dataset.portId
+      if (portId) {
+        void promotePort(portId)
       }
     }
   })

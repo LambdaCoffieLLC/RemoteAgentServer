@@ -116,6 +116,14 @@ export interface ControlPlaneClient {
   listSessions(): Promise<SessionRecord[]>
   listApprovals(): Promise<ProviderApprovalRecord[]>
   listPorts(request?: PortListRequest): Promise<ForwardedPortRecord[]>
+  openPort(
+    portId: string,
+    request?: {
+      visibility?: 'private' | 'shared'
+      label?: string
+      expiresAt?: string
+    },
+  ): Promise<ForwardedPortRecord>
   listChangedFiles(sessionId: string): Promise<SessionChangeSet>
   viewDiff(sessionId: string, request?: SessionDiffRequest): Promise<SessionDiffPage>
   decideApproval(
@@ -329,6 +337,18 @@ export function createControlPlaneClient(
         headers: createAuthorizedHeaders(options.token),
       })
       return await readResponseJson<ForwardedPortRecord[]>(response)
+    },
+    async openPort(portId, request = {}) {
+      return await requestJson<ForwardedPortRecord>(
+        options.baseUrl,
+        options.token,
+        `/api/ports/${portId}/open`,
+        {
+          method: 'POST',
+          body: request,
+        },
+        fetchImpl,
+      )
     },
     async listChangedFiles(sessionId) {
       return await requestJson<SessionChangeSet>(

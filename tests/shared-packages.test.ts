@@ -9,9 +9,11 @@ import {
   createTokenCredential,
 } from '../packages/auth/src/index.js'
 import {
+  commonDevelopmentPorts,
   createManagedPort,
   createManagedPortLabel,
   isManagedPortActive,
+  suggestManagedPortLabel,
 } from '../packages/ports/src/index.js'
 import {
   createProtocolEnvelope,
@@ -142,6 +144,21 @@ test('shared package factories cover the core business logic defaults', () => {
     managedUrl: 'http://127.0.0.1:4318/ports/forwarded-1',
   })
   assert.equal(createManagedPortLabel(forwardedPort), 'TCP 8080 (shared)')
+  assert.equal(commonDevelopmentPorts.includes(5173), true)
+  assert.equal(
+    suggestManagedPortLabel({
+      port: 5173,
+      protocol: 'http',
+    }),
+    'Vite dev server',
+  )
+  assert.equal(
+    suggestManagedPortLabel({
+      port: 9999,
+      protocol: 'tcp',
+    }),
+    undefined,
+  )
   assert.equal(isManagedPortActive(forwardedPort), true)
   assert.equal(
     isManagedPortActive({

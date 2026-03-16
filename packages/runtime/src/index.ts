@@ -7,6 +7,7 @@ import { createSessionDescriptor, type SessionDescriptor } from '@remote-agent-s
 export * from './status.js'
 export * from './provider-adapters.js'
 export * from './session-manager.js'
+export * from './port-detection.js'
 
 export interface RuntimeManifest {
   id: string

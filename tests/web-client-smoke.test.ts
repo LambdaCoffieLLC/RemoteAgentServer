@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createServer as createHttpServer } from 'node:http'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -91,6 +91,134 @@ async function createPreviewServer() {
   }
 }
 
+async function findAvailablePort(candidates: number[]) {
+  for (const candidate of candidates) {
+    const server = createHttpServer()
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(candidate, '127.0.0.1', () => {
+          server.off('error', rejectListen)
+          resolveListen()
+        })
+      })
+
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error)
+            return
+          }
+
+          resolveClose()
+        })
+      })
+
+      return candidate
+    } catch {
+      server.close()
+    }
+  }
+
+  throw new Error('Failed to reserve a detected development port for the web smoke test.')
+}
+
+function getExpectedDetectedLabel(port: number) {
+  switch (port) {
+    case 4173:
+      return 'Vite preview'
+    case 4321:
+      return 'Storybook'
+    case 5173:
+      return 'Vite dev server'
+    case 8787:
+      return 'Wrangler dev server'
+    default:
+      return `Detected port ${port}`
+  }
+}
+
+async function startWorkspaceDevelopmentServer(
+  workspacePath: string,
+  port: number,
+) {
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `
+        import { createServer } from 'node:http'
+        const server = createServer((request, response) => {
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          response.end('web-detected-preview:' + (request.url ?? '/'))
+        })
+        server.listen(${port}, '127.0.0.1', () => {
+          process.stdout.write('ready\\n')
+        })
+        process.on('SIGTERM', () => {
+          server.close(() => process.exit(0))
+        })
+      `,
+    ],
+    {
+      cwd: workspacePath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+
+  await new Promise<void>((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      child.kill('SIGTERM')
+      rejectReady(new Error('Timed out while waiting for the detected web dev server to start.'))
+    }, 5000)
+
+    function cleanup() {
+      clearTimeout(timeout)
+      child.stdout?.off('data', onStdout)
+      child.stderr?.off('data', onStderr)
+      child.off('exit', onExit)
+    }
+
+    function onStdout(chunk: Buffer) {
+      if (chunk.toString('utf8').includes('ready')) {
+        cleanup()
+        resolveReady()
+      }
+    }
+
+    function onStderr(chunk: Buffer) {
+      cleanup()
+      rejectReady(new Error(`Detected web dev server failed to start: ${chunk.toString('utf8').trim()}`))
+    }
+
+    function onExit(code: number | null) {
+      cleanup()
+      rejectReady(new Error(`Detected web dev server exited before startup with code ${code}.`))
+    }
+
+    child.stdout?.on('data', onStdout)
+    child.stderr?.on('data', onStderr)
+    child.once('exit', onExit)
+  })
+
+  return {
+    port,
+    async close() {
+      if (child.exitCode !== null) {
+        return
+      }
+
+      child.kill('SIGTERM')
+      await new Promise<void>((resolveClose) => {
+        child.once('exit', () => resolveClose())
+      })
+    },
+  }
+}
+
 async function waitFor<T>(
   predicate: () => T | Promise<T>,
   timeoutMs = 5000,
@@ -151,6 +279,7 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
   const tempDir = await createTempDir()
   const repositoryPath = await createCommittedRepository(tempDir)
   const previewServer = await createPreviewServer()
+  const detectedPortNumber = await findAvailablePort([5173, 4173, 8787, 4321])
   const server = await startControlPlaneServer({
     port: 0,
     dataFile: join(tempDir, 'state.json'),
@@ -180,6 +309,9 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
     url: 'http://web-client.test/',
   })
   const restoreGlobals = installDomGlobals(dom.window)
+  let detectedServer:
+    | Awaited<ReturnType<typeof startWorkspaceDevelopmentServer>>
+    | undefined
 
   try {
     const hostResponse = await fetch(`${server.url}/api/hosts`, {
@@ -206,6 +338,10 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
       }),
     })
     assert.equal(workspaceResponse.status, 201)
+    detectedServer = await startWorkspaceDevelopmentServer(
+      repositoryPath,
+      detectedPortNumber,
+    )
 
     const forwardedPortResponse = await fetch(`${server.url}/api/ports`, {
       method: 'POST',
@@ -223,23 +359,6 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
       }),
     })
     assert.equal(forwardedPortResponse.status, 201)
-
-    const detectedPortResponse = await fetch(`${server.url}/api/ports`, {
-      method: 'POST',
-      headers: operatorHeaders('operator-secret'),
-      body: JSON.stringify({
-        id: 'detected-4173',
-        hostId: 'host-1',
-        workspaceId: 'workspace-1',
-        label: 'Vite dev server',
-        targetHost: '127.0.0.1',
-        port: 4173,
-        protocol: 'http',
-        visibility: 'private',
-        state: 'detected',
-      }),
-    })
-    assert.equal(detectedPortResponse.status, 201)
 
     const mount = dom.window.document.getElementById('app')
     assert.ok(mount instanceof dom.window.HTMLElement)
@@ -273,13 +392,47 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
         assert.match(mount.textContent ?? '', /Remote • Registered runtime/)
         assert.match(mount.textContent ?? '', /workspace-1/)
         assert.match(mount.textContent ?? '', /Preview app/)
-        assert.match(mount.textContent ?? '', /Vite dev server/)
+        assert.match(
+          mount.textContent ?? '',
+          new RegExp(getExpectedDetectedLabel(detectedPortNumber)),
+        )
         return true
       })
 
       const previewLink = mount.querySelector<HTMLAnchorElement>('a.preview-link')
       assert.ok(previewLink)
       assert.equal(previewLink.href, `${server.url}/ports/preview-shared`)
+
+      const promoteButton = await waitFor(() => {
+        const candidate = mount.querySelector<HTMLButtonElement>('[data-action="promote-port"]')
+        assert.ok(candidate)
+        return candidate
+      })
+      promoteButton.click()
+
+      await waitFor(async () => {
+        const portResponse = await fetch(
+          `${server.url}/api/ports?workspaceId=workspace-1`,
+          {
+            headers: {
+              authorization: 'Bearer operator-secret',
+            },
+          },
+        )
+        const payload = (await portResponse.json()) as {
+          data?: Array<{ port: number; state: string }>
+        }
+        assert.equal(
+          payload.data?.some(
+            (entry) =>
+              entry.port === detectedPortNumber && entry.state === 'forwarded',
+          ),
+          true,
+        )
+        const previewLinks = mount.querySelectorAll('a.preview-link')
+        assert.equal(previewLinks.length >= 2, true)
+        return true
+      })
 
       const sessionResponse = await fetch(`${server.url}/api/sessions`, {
         method: 'POST',
@@ -347,6 +500,7 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
   } finally {
     restoreGlobals()
     dom.window.close()
+    await detectedServer?.close()
     await server.close()
     await previewServer.close()
   }

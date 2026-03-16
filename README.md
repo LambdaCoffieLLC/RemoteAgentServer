@@ -153,19 +153,27 @@ node --eval "import { createServer } from 'node:http'; createServer((_, res) => 
 
 curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
+  "http://127.0.0.1:4318/api/ports?workspaceId=workspace-1&includeDetected=true"
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
   -H 'content-type: application/json' \
-  -d '{"id":"preview-1","hostId":"host-1","workspaceId":"workspace-1","sessionId":"session-1","port":4173,"protocol":"http","visibility":"shared","label":"Preview","targetHost":"127.0.0.1"}' \
+  -d '{"visibility":"shared"}' \
+  http://127.0.0.1:4318/api/ports/detected-workspace-workspace-1-4173/open
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/ports
 
-curl -sS http://127.0.0.1:4318/ports/preview-1
+curl -sS http://127.0.0.1:4318/ports/detected-workspace-workspace-1-4173
 ```
 
 ### Confirm The Runnable Clients
 
-1. Open the web client, sign in, and confirm it shows the enrolled host, workspace, session, and forwarded preview.
+1. Open the web client, sign in, and confirm it shows the enrolled host, workspace, session, and the detected preview suggestion before you promote it.
 2. Open the Expo app, sign in with the same URL and token, and confirm it shows the host and live session state.
 3. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
-4. Open the shared preview from either client and confirm it returns `preview-ok`.
+4. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
 
 ### Clean Up The Smoke Test
 
@@ -174,7 +182,7 @@ rm -f "${REPO_PATH}/.remote-agent-smoke.txt"
 
 curl -sS -X POST \
   -H 'Authorization: Bearer operator-dev-token' \
-  http://127.0.0.1:4318/api/ports/preview-1/close
+  http://127.0.0.1:4318/api/ports/detected-workspace-workspace-1-4173/close
 
 curl -sS -X DELETE \
   -H 'Authorization: Bearer operator-dev-token' \

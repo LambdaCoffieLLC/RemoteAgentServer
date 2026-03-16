@@ -209,7 +209,9 @@
         "Detected ports are not exposed externally until a user forwards them",
         "Detection and promotion flows are covered by automated integration tests"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Added common development-port detection to @remote-agent-server/runtime using listening-process inspection, plus shared suggested labels in @remote-agent-server/ports. Updated the control plane so GET /api/ports with includeDetected=true returns auto-detected workspace or active-session ports, detected ports remain internal without managed URLs until promoted, and POST /api/ports/:id/open can promote a detected port into a managed forward. Extended the web client to show detected suggestions with an Open forward action, documented the manual detection flow in README.md, and added product-owned coverage in tests/server-control-plane.test.ts for detection and promotion plus tests/web-client-smoke.test.ts for the client-facing detected-port promotion flow. Verified with pnpm verify."
     },
     {
       "id": "US-014",
