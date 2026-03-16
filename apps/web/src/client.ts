@@ -15,6 +15,8 @@ export interface HostRecord {
   name: string
   platform: string
   runtimeVersion: string
+  hostMode: 'local' | 'remote'
+  connectionMode: 'attached' | 'registered'
   status: 'online' | 'offline'
   health: 'healthy' | 'degraded' | 'unhealthy'
   connectivity: 'connected' | 'disconnected'

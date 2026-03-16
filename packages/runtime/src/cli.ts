@@ -2,6 +2,8 @@
 
 import process from 'node:process'
 import {
+  type RuntimeConnectionMode,
+  type RuntimeHostMode,
   createRuntimeStatusReport,
   enrollRuntime,
   readRuntimeEnrollmentState,
@@ -55,8 +57,8 @@ function requireOption(options: RuntimeOptionMap, key: string, envName?: string)
 
 function printUsage() {
   process.stdout.write(`Usage:
-  remote-agent-runtime enroll --server-url <url> --bootstrap-token <token> --host-id <id> [--host-name <name>] [--state-file <path>]
-  remote-agent-runtime status --host-id <id> [--host-name <name>] [--state-file <path>]
+  remote-agent-runtime enroll --server-url <url> --bootstrap-token <token> --host-id <id> [--host-name <name>] [--host-mode <remote|local>] [--state-file <path>]
+  remote-agent-runtime status --host-id <id> [--host-name <name>] [--host-mode <remote|local>] [--connection-mode <registered|attached>] [--state-file <path>]
 `)
 }
 
@@ -96,6 +98,30 @@ function asRuntimeConnectivity(value: string | undefined): RuntimeConnectivity |
   return value
 }
 
+function asRuntimeHostMode(value: string | undefined): RuntimeHostMode | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  if (value !== 'local' && value !== 'remote') {
+    throw new Error(`Invalid runtime host mode "${value}".`)
+  }
+
+  return value
+}
+
+function asRuntimeConnectionMode(value: string | undefined): RuntimeConnectionMode | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  if (value !== 'attached' && value !== 'registered') {
+    throw new Error(`Invalid runtime connection mode "${value}".`)
+  }
+
+  return value
+}
+
 async function run() {
   const { command, options } = parseArguments(process.argv.slice(2))
 
@@ -111,6 +137,7 @@ async function run() {
       hostId: requireOption(options, 'host-id', 'RAS_HOST_ID'),
       name: getOption(options, 'host-name', 'RAS_HOST_NAME'),
       platform: getOption(options, 'platform', 'RAS_PLATFORM'),
+      hostMode: asRuntimeHostMode(getOption(options, 'host-mode', 'RAS_HOST_MODE')),
       stateFile: getOption(options, 'state-file', 'RAS_STATE_FILE'),
       status: asRuntimeStatus(getOption(options, 'status', 'RAS_STATUS')),
       health: asRuntimeHealth(getOption(options, 'health', 'RAS_HEALTH')),
@@ -134,6 +161,10 @@ async function run() {
       hostId: requireOption(options, 'host-id', 'RAS_HOST_ID'),
       name: getOption(options, 'host-name', 'RAS_HOST_NAME'),
       platform: getOption(options, 'platform', 'RAS_PLATFORM'),
+      hostMode: asRuntimeHostMode(getOption(options, 'host-mode', 'RAS_HOST_MODE')),
+      connectionMode: asRuntimeConnectionMode(
+        getOption(options, 'connection-mode', 'RAS_CONNECTION_MODE'),
+      ),
       status: asRuntimeStatus(getOption(options, 'status', 'RAS_STATUS')),
       health: asRuntimeHealth(getOption(options, 'health', 'RAS_HEALTH')),
       connectivity: asRuntimeConnectivity(getOption(options, 'connectivity', 'RAS_CONNECTIVITY')),

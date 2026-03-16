@@ -100,6 +100,14 @@ function formatSessionMode(session: SessionRecord) {
   return session.mode === 'worktree' ? 'Isolated worktree' : 'Direct workspace'
 }
 
+function formatHostLocation(host: HostRecord) {
+  return host.hostMode === 'local' ? 'Local' : 'Remote'
+}
+
+function formatHostConnection(host: HostRecord) {
+  return host.connectionMode === 'attached' ? 'Attached runtime' : 'Registered runtime'
+}
+
 function formatOutputPreview(text: string) {
   return text.trim().replaceAll('\n', ' ')
 }
@@ -125,11 +133,13 @@ function renderHosts(hosts: HostRecord[]) {
           <header class="inventory-header">
             <div>
               <h3>${escapeHtml(host.name)}</h3>
-              <p>${escapeHtml(host.platform)} • ${escapeHtml(host.runtimeVersion)}</p>
+              <p>${escapeHtml(formatHostLocation(host))} • ${escapeHtml(formatHostConnection(host))}</p>
             </div>
             <span class="status-pill ${escapeHtml(host.status)}">${escapeHtml(host.status)}</span>
           </header>
           <dl class="meta-grid">
+            <div><dt>Runtime</dt><dd>${escapeHtml(host.platform)} • ${escapeHtml(host.runtimeVersion)}</dd></div>
+            <div><dt>Host</dt><dd>${escapeHtml(host.id)}</dd></div>
             <div><dt>Health</dt><dd>${escapeHtml(host.health)}</dd></div>
             <div><dt>Connectivity</dt><dd>${escapeHtml(host.connectivity)}</dd></div>
             <div><dt>Registered</dt><dd>${escapeHtml(formatTimestamp(host.registeredAt))}</dd></div>

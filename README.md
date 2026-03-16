@@ -37,6 +37,42 @@ pnpm --filter @remote-agent-server/server dev
 
 The control plane listens on `http://127.0.0.1:4318` by default and persists state under `.remote-agent-server/control-plane.json`.
 
+To attach a first-class local runtime in development mode instead of registering every host manually, run the control plane with local mode enabled:
+
+```bash
+REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
+REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
+REMOTE_AGENT_SERVER_DEVELOPMENT_MODE=true \
+REMOTE_AGENT_SERVER_LOCAL_HOST_ID=local-dev-host \
+REMOTE_AGENT_SERVER_LOCAL_HOST_NAME='Local development runtime' \
+REMOTE_AGENT_SERVER_LOCAL_PLATFORM=darwin \
+pnpm --filter @remote-agent-server/server dev
+```
+
+When development mode is enabled, `GET /api/hosts` includes that attached runtime as `hostMode: "local"` and `connectionMode: "attached"`. Registered runtimes continue to use `connectionMode: "registered"`.
+
+### Local And Remote Runtime Modes
+
+Local and remote runtimes now share the same workspace and session APIs. The distinction is carried in host metadata instead of separate provider or session implementations:
+
+- `hostMode: "remote"` with `connectionMode: "registered"` for the normal enrolled runtime flow
+- `hostMode: "local"` with `connectionMode: "registered"` when the same runtime CLI enrolls a local machine with the server
+- `hostMode: "local"` with `connectionMode: "attached"` when the control plane starts in development mode
+
+After `pnpm build`, the same runtime CLI used for remote enrollment can register a local machine with the server:
+
+```bash
+pnpm --filter @remote-agent-server/runtime exec remote-agent-runtime enroll \
+  --server-url http://127.0.0.1:4318 \
+  --bootstrap-token bootstrap-dev-token \
+  --host-id laptop-local \
+  --host-name 'Laptop runtime' \
+  --platform darwin \
+  --host-mode local
+```
+
+The web and mobile clients render those local versus remote host labels directly from the control-plane host records.
+
 ### Launch The Runnable Clients
 
 Start the current browser client in a second terminal:

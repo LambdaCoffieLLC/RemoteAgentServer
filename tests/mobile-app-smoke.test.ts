@@ -126,6 +126,12 @@ test('mobile controller smoke covers auth, hosts or sessions, live updates, appr
     dataFile: join(tempDir, 'state.json'),
     operatorTokens: ['operator-secret'],
     bootstrapTokens: ['bootstrap-secret'],
+    developmentMode: true,
+    localRuntimeHost: {
+      id: 'local-dev-host',
+      name: 'local-devbox',
+      platform: 'darwin',
+    },
     runtimeProviderAdapters: [
       createCodexProviderAdapter({
         stepDelayMs: 20,
@@ -209,6 +215,24 @@ test('mobile controller smoke covers auth, hosts or sessions, live updates, appr
       const state = controller.getState()
       assert.equal(state.phase, 'ready')
       assert.equal(state.dashboard.hosts.some((host) => host.id === 'host-1'), true)
+      assert.equal(
+        state.dashboard.hosts.some(
+          (host) =>
+            host.id === 'local-dev-host' &&
+            host.hostMode === 'local' &&
+            host.connectionMode === 'attached',
+        ),
+        true,
+      )
+      assert.equal(
+        state.dashboard.hosts.some(
+          (host) =>
+            host.id === 'host-1' &&
+            host.hostMode === 'remote' &&
+            host.connectionMode === 'registered',
+        ),
+        true,
+      )
       assert.equal(
         state.dashboard.forwardedPorts.some((port) => port.id === 'preview-shared'),
         true,

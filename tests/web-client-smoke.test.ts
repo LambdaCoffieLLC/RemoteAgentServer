@@ -156,6 +156,12 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
     dataFile: join(tempDir, 'state.json'),
     operatorTokens: ['operator-secret'],
     bootstrapTokens: ['bootstrap-secret'],
+    developmentMode: true,
+    localRuntimeHost: {
+      id: 'local-dev-host',
+      name: 'local-devbox',
+      platform: 'darwin',
+    },
     runtimeProviderAdapters: [
       createCodexProviderAdapter({
         stepDelayMs: 20,
@@ -262,6 +268,9 @@ test('web client smoke covers sign-in, live events, diff review, approvals, prev
 
       await waitFor(() => {
         assert.match(mount.textContent ?? '', /devbox/)
+        assert.match(mount.textContent ?? '', /local-devbox/)
+        assert.match(mount.textContent ?? '', /Local • Attached runtime/)
+        assert.match(mount.textContent ?? '', /Remote • Registered runtime/)
         assert.match(mount.textContent ?? '', /workspace-1/)
         assert.match(mount.textContent ?? '', /Preview app/)
         assert.match(mount.textContent ?? '', /Vite dev server/)

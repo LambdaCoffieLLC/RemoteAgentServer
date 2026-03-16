@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native'
 import { MobileOperatorController } from './controller.js'
+import type { HostRecord } from './types.js'
 
 interface MobileOperatorAppProps {
   controller: MobileOperatorController
@@ -44,6 +45,14 @@ function getStateTone(state: string) {
 
 function formatOutputPreview(text: string) {
   return text.trim().replaceAll('\n', ' ')
+}
+
+function formatHostLocation(host: HostRecord) {
+  return host.hostMode === 'local' ? 'Local' : 'Remote'
+}
+
+function formatHostConnection(host: HostRecord) {
+  return host.connectionMode === 'attached' ? 'Attached runtime' : 'Registered runtime'
 }
 
 export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
@@ -486,6 +495,9 @@ export function MobileOperatorApp({ controller }: MobileOperatorAppProps) {
                             </Text>
                           </View>
                           <Text style={styles.cardBody}>
+                            {formatHostLocation(host)} • {formatHostConnection(host)}
+                          </Text>
+                          <Text style={styles.metaLine}>
                             {host.platform} • runtime {host.runtimeVersion}
                           </Text>
                           <Text style={styles.metaLine}>

@@ -24,12 +24,13 @@ The dependency direction flows inward. Apps depend on the shared packages and, w
 ## Runtime Flow
 
 1. An operator authenticates to `apps/server` with a bearer token.
-2. A runtime host enrolls with a bootstrap token through `POST /api/hosts`.
-3. A repository path is registered as a workspace on that host.
-4. The operator starts a session for `claude-code`, `codex`, or `opencode`.
-5. The runtime session manager emits logs, output, and state transitions.
-6. The control plane persists recoverable metadata and streams live events through `GET /api/events`.
-7. Web and mobile clients reconnect to the same control plane and recover active session state from the server.
+2. A runtime host either enrolls with a bootstrap token through `POST /api/hosts` or is attached locally when the control plane runs in development mode.
+3. Hosts carry shared runtime metadata: `hostMode` distinguishes local versus remote and `connectionMode` distinguishes attached versus registered runtimes.
+4. A repository path is registered as a workspace on that host.
+5. The operator starts a session for `claude-code`, `codex`, or `opencode`.
+6. The runtime session manager emits logs, output, and state transitions through the same in-process runtime abstractions for both local and remote hosts.
+7. The control plane persists recoverable metadata and streams live events through `GET /api/events`.
+8. Web and mobile clients reconnect to the same control plane and recover active session state from the server.
 
 ## Persistence And Networking
 

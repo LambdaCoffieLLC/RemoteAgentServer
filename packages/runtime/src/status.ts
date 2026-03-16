@@ -7,12 +7,16 @@ export const runtimeVersion = '0.1.0'
 export type RuntimeStatus = 'online' | 'offline'
 export type RuntimeHealth = 'healthy' | 'degraded' | 'unhealthy'
 export type RuntimeConnectivity = 'connected' | 'disconnected'
+export type RuntimeHostMode = 'local' | 'remote'
+export type RuntimeConnectionMode = 'attached' | 'registered'
 
 export interface RuntimeStatusReport {
   id: string
   name: string
   platform: string
   runtimeVersion: string
+  hostMode: RuntimeHostMode
+  connectionMode: RuntimeConnectionMode
   status: RuntimeStatus
   health: RuntimeHealth
   connectivity: RuntimeConnectivity
@@ -30,6 +34,8 @@ export interface CreateRuntimeStatusReportOptions {
   hostId: string
   name?: string
   platform?: string
+  hostMode?: RuntimeHostMode
+  connectionMode?: RuntimeConnectionMode
   status?: RuntimeStatus
   health?: RuntimeHealth
   connectivity?: RuntimeConnectivity
@@ -56,6 +62,8 @@ export function createRuntimeStatusReport(options: CreateRuntimeStatusReportOpti
     name: options.name?.trim() || hostname(),
     platform: options.platform?.trim() || 'linux',
     runtimeVersion,
+    hostMode: options.hostMode ?? 'remote',
+    connectionMode: options.connectionMode ?? 'registered',
     status: options.status ?? 'online',
     health: options.health ?? 'healthy',
     connectivity: options.connectivity ?? 'connected',
@@ -71,6 +79,8 @@ export async function enrollRuntime(options: EnrollRuntimeOptions): Promise<Runt
     hostId: options.hostId,
     name: options.name,
     platform: options.platform,
+    hostMode: options.hostMode,
+    connectionMode: options.connectionMode,
     status: options.status,
     health: options.health,
     connectivity: options.connectivity,

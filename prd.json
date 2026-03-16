@@ -87,7 +87,9 @@
         "Clients clearly distinguish local and remote hosts",
         "Local and remote flows share the same core runtime abstractions and tests prove the parity"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Extended the shared runtime status contract with hostMode and connectionMode so the same runtime CLI can register a local machine with --host-mode local, while apps/server can also attach a first-class local runtime automatically when REMOTE_AGENT_SERVER_DEVELOPMENT_MODE=true. Updated the control plane to persist and serve attached or registered local/remote host metadata, kept workspace and session APIs unchanged across local and remote hosts, and updated the web and mobile clients to label local versus remote runtimes explicitly. Documented the development-mode and local-registration workflows in README.md plus docs/architecture.md, and added product-owned parity coverage in tests/server-control-plane.test.ts for local registration plus attached-local versus remote session lifecycle equivalence, alongside client distinction coverage in tests/web-client-smoke.test.ts and tests/mobile-app-smoke.test.ts. Verified with pnpm verify."
     },
     {
       "id": "US-006",

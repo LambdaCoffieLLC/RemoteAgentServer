@@ -18,7 +18,10 @@ import {
   startControlPlaneServer,
   type ControlPlaneEvent,
 } from '../apps/server/src/index.js'
-import { createCodexProviderAdapter } from '../packages/runtime/src/index.js'
+import {
+  createCodexProviderAdapter,
+  enrollRuntime,
+} from '../packages/runtime/src/index.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -85,6 +88,32 @@ async function createPreviewServer() {
       })
     },
   }
+}
+
+async function waitFor<T>(
+  predicate: () => T | Promise<T>,
+  timeoutMs = 5000,
+  intervalMs = 40,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+
+  while (Date.now() < deadline) {
+    try {
+      const value = await predicate()
+      if (value) {
+        return value
+      }
+    } catch (error) {
+      lastError = error
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Timed out while waiting for the control-plane assertion.')
 }
 
 async function waitForEvent(
@@ -254,6 +283,195 @@ test('control plane rejects unauthorized access and accepts bootstrap host regis
     })
     assert.equal(hosts.status, 200)
     assert.equal(((await readJson(hosts)).data as unknown[]).length, 1)
+  } finally {
+    await server.close()
+  }
+})
+
+test('local runtimes can register or attach in development mode and share the same session lifecycle as remote runtimes', async () => {
+  const tempDir = await createTempDir()
+  const localRepositoryPath = await createGitRepository(tempDir, 'local-repo')
+  const remoteRepositoryPath = await createGitRepository(tempDir, 'remote-repo')
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile: join(tempDir, 'state.json'),
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+    developmentMode: true,
+    localRuntimeHost: {
+      id: 'local-attached',
+      name: 'Local workstation',
+      platform: 'darwin',
+    },
+    runtimeProviderAdapters: [createCodexProviderAdapter({ stepDelayMs: 10 })],
+  })
+
+  try {
+    const localEnrollment = await enrollRuntime({
+      serverUrl: server.url,
+      bootstrapToken: 'bootstrap-secret',
+      hostId: 'local-registered',
+      name: 'Laptop runtime',
+      platform: 'darwin',
+      hostMode: 'local',
+    })
+    assert.equal(localEnrollment.host.hostMode, 'local')
+    assert.equal(localEnrollment.host.connectionMode, 'registered')
+
+    const remoteRegistration = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'remote-host',
+        name: 'buildbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(remoteRegistration.status, 201)
+
+    const hostsResponse = await fetch(`${server.url}/api/hosts`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(hostsResponse.status, 200)
+    const hosts = (await readJson(hostsResponse)).data as Array<{
+      id: string
+      hostMode: string
+      connectionMode: string
+    }>
+    assert.deepEqual(
+      hosts
+        .map((host) => ({
+          id: host.id,
+          hostMode: host.hostMode,
+          connectionMode: host.connectionMode,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      [
+        {
+          id: 'local-attached',
+          hostMode: 'local',
+          connectionMode: 'attached',
+        },
+        {
+          id: 'local-registered',
+          hostMode: 'local',
+          connectionMode: 'registered',
+        },
+        {
+          id: 'remote-host',
+          hostMode: 'remote',
+          connectionMode: 'registered',
+        },
+      ],
+    )
+
+    const workspaceRequests = [
+      fetch(`${server.url}/api/workspaces`, {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({
+          id: 'workspace-local',
+          hostId: 'local-attached',
+          runtimeHostId: 'local-attached',
+          path: localRepositoryPath,
+        }),
+      }),
+      fetch(`${server.url}/api/workspaces`, {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({
+          id: 'workspace-remote',
+          hostId: 'remote-host',
+          runtimeHostId: 'remote-host',
+          path: remoteRepositoryPath,
+        }),
+      }),
+    ]
+
+    for (const response of await Promise.all(workspaceRequests)) {
+      assert.equal(response.status, 201)
+    }
+
+    const sessionRequests = [
+      fetch(`${server.url}/api/sessions`, {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({
+          id: 'session-local',
+          workspaceId: 'workspace-local',
+          provider: 'codex',
+        }),
+      }),
+      fetch(`${server.url}/api/sessions`, {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({
+          id: 'session-remote',
+          workspaceId: 'workspace-remote',
+          provider: 'codex',
+        }),
+      }),
+    ]
+
+    for (const response of await Promise.all(sessionRequests)) {
+      assert.equal(response.status, 201)
+    }
+
+    const [localSessionRecord, remoteSessionRecord] = await Promise.all([
+      waitFor(async () => {
+        const response = await fetch(`${server.url}/api/sessions/session-local`, {
+          headers: {
+            authorization: 'Bearer operator-secret',
+          },
+        })
+        assert.equal(response.status, 200)
+        const record = (await readJson(response)).data as {
+          id: string
+          hostId: string
+          runtimeHostId: string
+          state: string
+          logs: Array<{ message: string }>
+          output: Array<{ text: string }>
+        }
+        return record.state === 'completed' ? record : undefined
+      }),
+      waitFor(async () => {
+        const response = await fetch(`${server.url}/api/sessions/session-remote`, {
+          headers: {
+            authorization: 'Bearer operator-secret',
+          },
+        })
+        assert.equal(response.status, 200)
+        const record = (await readJson(response)).data as {
+          id: string
+          hostId: string
+          runtimeHostId: string
+          state: string
+          logs: Array<{ message: string }>
+          output: Array<{ text: string }>
+        }
+        return record.state === 'completed' ? record : undefined
+      }),
+    ])
+
+    assert.ok(localSessionRecord)
+    assert.ok(remoteSessionRecord)
+    assert.equal(localSessionRecord.hostId, 'local-attached')
+    assert.equal(localSessionRecord.runtimeHostId, 'local-attached')
+    assert.equal(remoteSessionRecord.hostId, 'remote-host')
+    assert.equal(remoteSessionRecord.runtimeHostId, 'remote-host')
+    assert.deepEqual(
+      localSessionRecord.logs.map((entry) => entry.message),
+      remoteSessionRecord.logs.map((entry) => entry.message),
+    )
+    assert.deepEqual(
+      localSessionRecord.output.map((entry) => entry.text),
+      remoteSessionRecord.output.map((entry) => entry.text),
+    )
   } finally {
     await server.close()
   }

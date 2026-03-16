@@ -48,9 +48,12 @@ import {
 } from '@remote-agent-server/providers'
 import {
   createRuntimeManifest,
+  createRuntimeStatusReport,
   createRuntimeSessionManager,
   type RuntimeProviderAdapter,
   type RuntimeProviderAdapterRegistry,
+  type RuntimeConnectionMode,
+  type RuntimeHostMode,
   type RuntimeSessionHandle,
 } from '@remote-agent-server/runtime'
 import {
@@ -83,6 +86,8 @@ export interface HostRecord {
   name: string
   platform: string
   runtimeVersion: string
+  hostMode: RuntimeHostMode
+  connectionMode: RuntimeConnectionMode
   status: 'online' | 'offline'
   health: 'healthy' | 'degraded' | 'unhealthy'
   connectivity: 'connected' | 'disconnected'
@@ -198,6 +203,8 @@ export interface ControlPlaneConfigFile {
   dataFile?: string
   operatorTokens?: string[]
   bootstrapTokens?: string[]
+  developmentMode?: boolean
+  localRuntimeHost?: LocalRuntimeHostConfig
 }
 
 export interface ControlPlaneConfig {
@@ -206,6 +213,8 @@ export interface ControlPlaneConfig {
   dataFile: string
   operatorTokens: string[]
   bootstrapTokens: string[]
+  developmentMode: boolean
+  localRuntimeHost?: LocalRuntimeHostConfig
 }
 
 export interface StartControlPlaneOptions extends Partial<ControlPlaneConfigFile> {
@@ -213,6 +222,12 @@ export interface StartControlPlaneOptions extends Partial<ControlPlaneConfigFile
   runtimeProviderAdapters?:
     | RuntimeProviderAdapterRegistry
     | Iterable<RuntimeProviderAdapter>
+}
+
+export interface LocalRuntimeHostConfig {
+  id?: string
+  name?: string
+  platform?: string
 }
 
 export interface ControlPlaneEvent<TPayload = unknown> {
@@ -273,6 +288,57 @@ function splitTokenList(value?: string) {
   )
 }
 
+function parseOptionalBooleanValue(
+  value: unknown,
+  fieldName: string,
+): boolean | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+
+  if (typeof value !== 'boolean') {
+    throw new Error(`"${fieldName}" must be a boolean when provided.`)
+  }
+
+  return value
+}
+
+function readBooleanEnv(name: string) {
+  const value = process.env[name]
+  if (value === undefined) {
+    return undefined
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'true' || normalized === '1') {
+    return true
+  }
+
+  if (normalized === 'false' || normalized === '0') {
+    return false
+  }
+
+  throw new Error(`Environment variable "${name}" must be "true", "false", "1", or "0".`)
+}
+
+function resolveLocalRuntimeHostConfig(
+  options: Partial<ControlPlaneConfigFile>,
+  fileConfig: ControlPlaneConfigFile,
+): LocalRuntimeHostConfig | undefined {
+  const envConfig = {
+    id: process.env.REMOTE_AGENT_SERVER_LOCAL_HOST_ID,
+    name: process.env.REMOTE_AGENT_SERVER_LOCAL_HOST_NAME,
+    platform: process.env.REMOTE_AGENT_SERVER_LOCAL_PLATFORM,
+  } satisfies LocalRuntimeHostConfig
+  const resolved = {
+    ...(fileConfig.localRuntimeHost ?? {}),
+    ...envConfig,
+    ...(options.localRuntimeHost ?? {}),
+  } satisfies LocalRuntimeHostConfig
+
+  return resolved.id || resolved.name || resolved.platform ? resolved : undefined
+}
+
 async function readConfigFile(
   configFile?: string,
 ): Promise<ControlPlaneConfigFile> {
@@ -327,6 +393,12 @@ export async function resolveControlPlaneConfig(
     process.env.REMOTE_AGENT_SERVER_DATA_FILE ??
     fileConfig.dataFile ??
     defaultDataFile
+  const developmentMode =
+    options.developmentMode ??
+    readBooleanEnv('REMOTE_AGENT_SERVER_DEVELOPMENT_MODE') ??
+    parseOptionalBooleanValue(fileConfig.developmentMode, 'developmentMode') ??
+    false
+  const localRuntimeHost = resolveLocalRuntimeHostConfig(options, fileConfig)
 
   return {
     host,
@@ -336,11 +408,34 @@ export async function resolveControlPlaneConfig(
       : resolve(configuredDataFile),
     operatorTokens,
     bootstrapTokens,
+    developmentMode,
+    localRuntimeHost,
   }
 }
 
 function normalizeTokens(tokens: string[]) {
   return [...new Set(tokens.map((token) => token.trim()).filter(Boolean))]
+}
+
+function createAttachedLocalHost(
+  config: ControlPlaneConfig,
+  existingHost?: HostRecord,
+): HostRecord {
+  const fallbackId = existingHost?.id ?? 'local-dev-host'
+  const fallbackName = existingHost?.name ?? 'Local development runtime'
+  const fallbackPlatform = existingHost?.platform ?? process.platform
+
+  return createRuntimeStatusReport({
+    hostId: config.localRuntimeHost?.id ?? fallbackId,
+    name: config.localRuntimeHost?.name ?? fallbackName,
+    platform: config.localRuntimeHost?.platform ?? fallbackPlatform,
+    hostMode: 'local',
+    connectionMode: 'attached',
+    status: 'online',
+    health: 'healthy',
+    connectivity: 'connected',
+    registeredAt: existingHost?.registeredAt,
+  })
 }
 
 async function loadPersistedState(dataFile: string) {
@@ -351,7 +446,14 @@ async function loadPersistedState(dataFile: string) {
     return {
       ...createEmptyState(),
       ...parsed,
-      hosts: parsed.hosts ?? [],
+      hosts: (parsed.hosts ?? []).map((host) => {
+        const hostRecord = host as Partial<HostRecord>
+        return {
+          ...hostRecord,
+          hostMode: hostRecord.hostMode ?? 'remote',
+          connectionMode: hostRecord.connectionMode ?? 'registered',
+        } as HostRecord
+      }),
       workspaces: parsed.workspaces ?? [],
       sessions: (parsed.sessions ?? []).map((session) => {
         const sessionRecord = session as Partial<SessionRecord>
@@ -600,6 +702,15 @@ function requireHostRecord(body: unknown): HostRecord {
     name: requireString(record.name, 'name'),
     platform: requireString(record.platform, 'platform'),
     runtimeVersion: requireString(record.runtimeVersion, 'runtimeVersion'),
+    hostMode: requireEnum(record.hostMode ?? 'remote', 'hostMode', [
+      'local',
+      'remote',
+    ]),
+    connectionMode: requireEnum(
+      record.connectionMode ?? 'registered',
+      'connectionMode',
+      ['attached', 'registered'],
+    ),
     status: requireEnum(record.status ?? 'online', 'status', [
       'online',
       'offline',
@@ -1635,6 +1746,18 @@ export async function startControlPlaneServer(
     )
     persistSequence = task.catch(() => undefined)
     return task
+  }
+
+  if (config.developmentMode) {
+    const existingHostId = config.localRuntimeHost?.id
+    const existingHost = existingHostId
+      ? state.hosts.find((host) => host.id === existingHostId)
+      : state.hosts.find(
+          (host) =>
+            host.hostMode === 'local' && host.connectionMode === 'attached',
+        )
+    upsertRecord(state.hosts, createAttachedLocalHost(config, existingHost))
+    await persistCurrentState()
   }
 
   function broadcastEvent(event: ControlPlaneEvent) {
