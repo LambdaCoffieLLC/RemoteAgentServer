@@ -20,7 +20,16 @@ import {
   type WorkspaceId,
 } from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
-import { createSessionSummary, type SessionStatus, type SessionSummary } from '@remote-agent/sessions'
+import {
+  createSessionEvent,
+  createSessionSummary,
+  type SessionEvent,
+  type SessionEventKind,
+  type SessionLogLevel,
+  type SessionOutputStream,
+  type SessionStatus,
+  type SessionSummary,
+} from '@remote-agent/sessions'
 
 const hostId = 'host_control_plane' as HostId
 const workspaceId = 'workspace_server' as WorkspaceId
@@ -93,6 +102,7 @@ export interface ControlPlaneState {
   hosts: HostRecord[]
   workspaces: WorkspaceRecord[]
   sessions: SessionSummary[]
+  sessionEvents: SessionEvent[]
   approvals: ApprovalRecord[]
   ports: ForwardedPort[]
   notifications: NotificationRecord[]
@@ -147,6 +157,17 @@ interface CreateSessionInput {
 
 interface UpdateSessionInput {
   status: SessionStatus
+}
+
+interface CreateSessionEventInput {
+  kind: Extract<SessionEventKind, 'log' | 'output'>
+  message: string
+  level?: SessionLogLevel
+  stream?: SessionOutputStream
+}
+
+interface SessionLifecycleActionInput {
+  action: 'pause' | 'resume' | 'cancel'
 }
 
 interface EnrollRuntimeInput {
@@ -223,6 +244,7 @@ const emptyState: ControlPlaneState = {
   hosts: [],
   workspaces: [],
   sessions: [],
+  sessionEvents: [],
   approvals: [],
   ports: [],
   notifications: [],
@@ -450,9 +472,30 @@ export class ControlPlaneServer {
     return [...this.state.sessions]
   }
 
+  async inspectSession(id: SessionId) {
+    return this.getSession(id)
+  }
+
+  async listSessionEvents(sessionId: SessionId) {
+    this.getSession(sessionId)
+    return this.state.sessionEvents.filter((event) => event.sessionId === sessionId).sort((left, right) => left.sequence - right.sequence)
+  }
+
   async createSession(input: CreateSessionInput, actor?: AuthenticatedActor) {
     this.assertHostExists(input.hostId)
-    this.assertWorkspaceExists(input.workspaceId)
+    const workspace = this.getWorkspace(input.workspaceId)
+
+    if (workspace.hostId !== input.hostId) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_session_workspace',
+        `Workspace ${input.workspaceId} is registered on host ${workspace.hostId}, not ${input.hostId}.`,
+      )
+    }
+
+    if (!coreProviderDescriptors.some((descriptor) => descriptor.id === input.provider)) {
+      throw new ControlPlaneRequestError(400, 'invalid_provider', `Provider ${input.provider} is not supported.`)
+    }
 
     const session = createSessionSummary({
       id: input.id,
@@ -460,29 +503,61 @@ export class ControlPlaneServer {
       workspaceId: input.workspaceId,
       provider: input.provider,
       requestedBy: input.requestedBy ?? pickActorIdentity(actor),
-      status: input.status ?? 'queued',
+      status: input.status ?? 'running',
       startedAt: input.startedAt ?? this.clock(),
     })
 
     this.state.sessions = upsertRecord(this.state.sessions, session)
+    const sessionEvent = this.buildStatusSessionEvent(session.id, session.status, undefined, session.provider)
+    this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
     await this.persistState()
     this.publishEvent('session.upserted', { session })
+    this.publishEvent('session.event.created', { sessionEvent })
     await this.maybeCreateSessionNotification(session)
     return session
   }
 
   async updateSession(id: SessionId, input: UpdateSessionInput) {
     const current = this.getSession(id)
+
+    if (current.status === input.status) {
+      return current
+    }
+
+    assertSessionStatusTransition(current.status, input.status)
     const updated = createSessionSummary({
       ...current,
       status: input.status,
     })
 
     this.state.sessions = upsertRecord(this.state.sessions, updated)
+    const sessionEvent = this.buildStatusSessionEvent(updated.id, updated.status, current.status)
+    this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
     await this.persistState()
     this.publishEvent('session.updated', { session: updated })
+    this.publishEvent('session.event.created', { sessionEvent })
     await this.maybeCreateSessionNotification(updated)
     return updated
+  }
+
+  async applySessionAction(id: SessionId, input: SessionLifecycleActionInput) {
+    const current = this.getSession(id)
+    const nextStatus = mapLifecycleActionToStatus(input.action, current.status)
+    return this.updateSession(id, { status: nextStatus })
+  }
+
+  async createSessionEvent(sessionId: SessionId, input: CreateSessionEventInput) {
+    this.getSession(sessionId)
+
+    if (input.message.trim().length === 0) {
+      throw new ControlPlaneRequestError(400, 'invalid_session_event', 'Session events require a non-empty message.')
+    }
+
+    const sessionEvent = this.buildSessionEvent(sessionId, input)
+    this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
+    await this.persistState()
+    this.publishEvent('session.event.created', { sessionEvent })
+    return sessionEvent
   }
 
   async listApprovals() {
@@ -724,6 +799,30 @@ export class ControlPlaneServer {
         return
       }
 
+      if (request.method === 'GET' && pathSegments[0] === 'v1' && pathSegments[1] === 'sessions' && pathSegments[2] && !pathSegments[3]) {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.inspectSession(pathSegments[2] as SessionId) })
+        return
+      }
+
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'events'
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.listSessionEvents(pathSegments[2] as SessionId) })
+        return
+      }
+
       if (request.method === 'POST' && url.pathname === '/v1/sessions') {
         const actor = this.authorizeRequest(request, response, 'sessions:write')
 
@@ -739,6 +838,64 @@ export class ControlPlaneServer {
         }
 
         this.writeJson(response, 201, { data: await this.createSession(input as CreateSessionInput, actor) })
+        return
+      }
+
+      if (
+        request.method === 'POST' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'events'
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<CreateSessionEventInput>
+
+        if (!input.kind || !['log', 'output'].includes(input.kind) || !input.message) {
+          this.writeError(
+            response,
+            400,
+            'invalid_session_event',
+            'Session event creation requires kind=log|output and a message.',
+          )
+          return
+        }
+
+        this.writeJson(response, 201, {
+          data: await this.createSessionEvent(pathSegments[2] as SessionId, input as CreateSessionEventInput),
+        })
+        return
+      }
+
+      if (
+        request.method === 'POST' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'actions'
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<SessionLifecycleActionInput>
+
+        if (!input.action || !['pause', 'resume', 'cancel'].includes(input.action)) {
+          this.writeError(
+            response,
+            400,
+            'invalid_session_action',
+            'Session actions require action=pause|resume|cancel.',
+          )
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.applySessionAction(pathSegments[2] as SessionId, input as SessionLifecycleActionInput),
+        })
         return
       }
 
@@ -1016,6 +1173,46 @@ export class ControlPlaneServer {
     return approval
   }
 
+  private buildSessionEvent(sessionId: SessionId, input: CreateSessionEventInput) {
+    const nextSequence = this.nextSessionEventSequence(sessionId)
+    return createSessionEvent({
+      id: toSessionEventId(sessionId, nextSequence),
+      sessionId,
+      sequence: nextSequence,
+      kind: input.kind,
+      createdAt: this.clock(),
+      message: input.message.trim(),
+      level: input.kind === 'log' ? input.level ?? 'info' : undefined,
+      stream: input.kind === 'output' ? input.stream ?? 'stdout' : undefined,
+    })
+  }
+
+  private buildStatusSessionEvent(
+    sessionId: SessionId,
+    status: SessionStatus,
+    previousStatus?: SessionStatus,
+    provider?: SessionSummary['provider'],
+  ) {
+    const nextSequence = this.nextSessionEventSequence(sessionId)
+    return createSessionEvent({
+      id: toSessionEventId(sessionId, nextSequence),
+      sessionId,
+      sequence: nextSequence,
+      kind: 'status',
+      createdAt: this.clock(),
+      message: describeSessionStatusMessage(status, previousStatus, provider),
+      status,
+    })
+  }
+
+  private nextSessionEventSequence(sessionId: SessionId) {
+    const sequence = this.state.sessionEvents
+      .filter((event) => event.sessionId === sessionId)
+      .reduce((maxSequence, event) => Math.max(maxSequence, event.sequence), 0)
+
+    return sequence + 1
+  }
+
   private async maybeCreateSessionNotification(session: SessionSummary) {
     if (!['completed', 'failed'].includes(session.status)) {
       return
@@ -1112,7 +1309,8 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
   return {
     hosts: [...(seedState?.hosts ?? emptyState.hosts)],
     workspaces: (seedState?.workspaces ?? emptyState.workspaces).map((workspace) => normalizeWorkspaceRecord(workspace)),
-    sessions: [...(seedState?.sessions ?? emptyState.sessions)],
+    sessions: (seedState?.sessions ?? emptyState.sessions).map((session) => createSessionSummary(session)),
+    sessionEvents: (seedState?.sessionEvents ?? emptyState.sessionEvents).map((event) => createSessionEvent(event)),
     approvals: [...(seedState?.approvals ?? emptyState.approvals)],
     ports: [...(seedState?.ports ?? emptyState.ports)],
     notifications: [...(seedState?.notifications ?? emptyState.notifications)],
@@ -1131,6 +1329,7 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
     })),
     workspaces: state.workspaces.map((workspace) => normalizeWorkspaceRecord(workspace)),
     sessions: state.sessions.map((session) => createSessionSummary(session)),
+    sessionEvents: state.sessionEvents.map((event) => createSessionEvent(event)),
     approvals: state.approvals.map((approval) => ({
       ...approval,
       requestedBy: { ...approval.requestedBy },
@@ -1159,6 +1358,85 @@ function pickActorIdentity(actor?: AuthenticatedActor) {
 
 function toNotificationId(id: string): NotificationId {
   return `notification_${id.replace(/^[^_]+_/, '')}`
+}
+
+function toSessionEventId(sessionId: SessionId, sequence: number) {
+  return `session_event_${sessionId.replace(/^session_/, '')}_${sequence}` as SessionEvent['id']
+}
+
+function mapLifecycleActionToStatus(action: SessionLifecycleActionInput['action'], currentStatus: SessionStatus): SessionStatus {
+  if (action === 'pause') {
+    if (currentStatus !== 'running') {
+      throw new ControlPlaneRequestError(409, 'invalid_session_transition', `Session ${currentStatus} cannot be paused.`)
+    }
+
+    return 'paused'
+  }
+
+  if (action === 'resume') {
+    if (currentStatus !== 'paused') {
+      throw new ControlPlaneRequestError(409, 'invalid_session_transition', `Session ${currentStatus} cannot be resumed.`)
+    }
+
+    return 'running'
+  }
+
+  if (!['queued', 'running', 'paused'].includes(currentStatus)) {
+    throw new ControlPlaneRequestError(409, 'invalid_session_transition', `Session ${currentStatus} cannot be canceled.`)
+  }
+
+  return 'canceled'
+}
+
+function assertSessionStatusTransition(currentStatus: SessionStatus, nextStatus: SessionStatus) {
+  const allowedTransitions: Record<SessionStatus, SessionStatus[]> = {
+    queued: ['running', 'failed', 'canceled'],
+    running: ['paused', 'completed', 'failed', 'canceled'],
+    paused: ['running', 'failed', 'canceled'],
+    completed: [],
+    failed: [],
+    canceled: [],
+  }
+
+  if (!allowedTransitions[currentStatus].includes(nextStatus)) {
+    throw new ControlPlaneRequestError(
+      409,
+      'invalid_session_transition',
+      `Session ${currentStatus} cannot transition to ${nextStatus}.`,
+    )
+  }
+}
+
+function describeSessionStatusMessage(
+  status: SessionStatus,
+  previousStatus?: SessionStatus,
+  provider?: SessionSummary['provider'],
+) {
+  if (status === 'running' && previousStatus === 'paused') {
+    return 'Session resumed.'
+  }
+
+  if (status === 'running') {
+    return provider ? `Session started with provider ${provider}.` : 'Session started.'
+  }
+
+  if (status === 'paused') {
+    return 'Session paused.'
+  }
+
+  if (status === 'completed') {
+    return 'Session completed.'
+  }
+
+  if (status === 'failed') {
+    return 'Session failed.'
+  }
+
+  if (status === 'canceled') {
+    return 'Session canceled.'
+  }
+
+  return 'Session queued.'
 }
 
 function deriveRuntimeStatus(runtime: Pick<HostRuntimeRecord, 'connectivity' | 'health'>): HostRuntimeStatus {

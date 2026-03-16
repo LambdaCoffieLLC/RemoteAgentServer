@@ -94,7 +94,9 @@
         "Sessions can be paused, canceled, and resumed",
         "Disconnected clients can reconnect and recover active session state"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended apps/server/src/index.ts and packages/sessions/src/index.ts so sessions validate provider/workspace selection, start in a running state, persist ordered status/log/output events, expose session detail and session event history endpoints, and support pause, resume, and cancel lifecycle actions while streaming live SSE updates and reconnect snapshots that include active session state. Added .agents/ralph/tests/us-007-start-and-monitor-sessions.test.ts coverage for start/monitor flows, live status-log-output delivery, pause-resume-cancel actions, and reconnect recovery, then verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-008",
