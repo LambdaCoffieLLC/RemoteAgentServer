@@ -6,7 +6,11 @@
   "types": "src/index.ts",
   "files": ["dist"],
   "dependencies": {
-    "@remote-agent-server/shared": "workspace:*"
+    "@remote-agent-server/auth": "workspace:*",
+    "@remote-agent-server/ports": "workspace:*",
+    "@remote-agent-server/protocol": "workspace:*",
+    "@remote-agent-server/providers": "workspace:*",
+    "@remote-agent-server/sessions": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

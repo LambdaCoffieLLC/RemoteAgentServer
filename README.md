@@ -25,8 +25,13 @@ repo/
 │   ├── server/
 │   └── web/
 ├── packages/
+│   ├── auth/
+│   ├── ports/
+│   ├── protocol/
+│   ├── providers/
 │   ├── runtime/
-│   └── shared/
+│   ├── sessions/
+│   └── ui/
 ├── .agents/
 │   └── ralph/
 ├── eslint.config.mjs
@@ -48,6 +53,19 @@ repo/
 - `pnpm verify:ralph` keeps Ralph pointed at the same root verification flow.
 - `pnpm ralph` and `pnpm ralph:danger` continue to run the local Ralph automation.
 
+## Shared Package Boundaries
+
+The shared core model is split into focused workspace packages so server, runtime, and clients import the same domain contracts instead of re-declaring local copies.
+
+- `@remote-agent-server/protocol`: shared control-plane envelopes, application kinds, and package identifiers.
+- `@remote-agent-server/auth`: token schemes and auth policies used by the server, runtime enrollment, and clients.
+- `@remote-agent-server/sessions`: session identifiers, lifecycle states, and workspace/worktree execution modes.
+- `@remote-agent-server/ports`: detected and forwarded port metadata, visibility, and presentation labels.
+- `@remote-agent-server/providers`: provider adapter identities and launch descriptors for Claude Code, Codex, and OpenCode.
+- `@remote-agent-server/ui`: UI-safe primitives such as navigation items and status badges for client surfaces.
+
+The intended dependency direction is from apps and feature packages inward to these shared packages. `packages/runtime` composes the shared domain packages, while app packages depend on the shared packages and the runtime package rather than redefining auth, session, port, provider, or UI models locally.
+
 ## Centralized Tooling
 
 - `pnpm-workspace.yaml` defines all first-party workspace packages.
@@ -63,4 +81,4 @@ CI should execute `pnpm install --frozen-lockfile` followed by `pnpm verify`. A 
 
 - `prd.json` remains the canonical execution spec.
 - `.agents/ralph` still contains the repo-local runner, prompt rules, and verification artifacts.
-- The current app and package code is intentionally minimal scaffold code for the monorepo story only.
+- The current app and package code is still minimal, but the shared core packages now define the canonical domain model for the monorepo.

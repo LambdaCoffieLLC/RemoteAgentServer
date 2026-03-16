@@ -39,7 +39,9 @@
         "Changes in shared types are validated by typecheck across all dependent apps",
         "Shared packages expose runtime-safe exports that match their declared package entrypoints"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Replaced the generic shared scaffold with focused workspace packages at packages/protocol, packages/auth, packages/sessions, packages/ports, packages/providers, and packages/ui; updated packages/runtime plus apps/server, apps/web, apps/mobile, and apps/desktop to consume those shared contracts; documented package responsibilities and dependency direction in README.md; and added repo-owned coverage in tests/shared-packages.test.ts plus updated monorepo coverage in tests/monorepo.test.ts. Verified with pnpm verify, including runtime entrypoint checks against built dist exports and typecheck across dependent workspaces."
     },
     {
       "id": "US-003",

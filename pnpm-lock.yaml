@@ -35,38 +35,117 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@remote-agent-server/shared':
+      '@remote-agent-server/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent-server/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent-server/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent-server/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent-server/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent-server/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
 
   apps/mobile:
     dependencies:
-      '@remote-agent-server/shared':
+      '@remote-agent-server/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent-server/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent-server/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent-server/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent-server/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent-server/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
 
   apps/server:
     dependencies:
+      '@remote-agent-server/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@remote-agent-server/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent-server/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent-server/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@remote-agent-server/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
-      '@remote-agent-server/shared':
+      '@remote-agent-server/sessions':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/sessions
 
   apps/web:
     dependencies:
-      '@remote-agent-server/shared':
+      '@remote-agent-server/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent-server/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent-server/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent-server/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent-server/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent-server/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+
+  packages/auth: {}
+
+  packages/ports: {}
+
+  packages/protocol: {}
+
+  packages/providers: {}
 
   packages/runtime:
     dependencies:
-      '@remote-agent-server/shared':
+      '@remote-agent-server/auth':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../auth
+      '@remote-agent-server/ports':
+        specifier: workspace:*
+        version: link:../ports
+      '@remote-agent-server/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@remote-agent-server/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@remote-agent-server/sessions':
+        specifier: workspace:*
+        version: link:../sessions
 
-  packages/shared: {}
+  packages/sessions: {}
+
+  packages/ui: {}
 
 packages:
 

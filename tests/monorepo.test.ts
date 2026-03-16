@@ -14,8 +14,13 @@ const expectedWorkspaces = [
   'apps/web',
   'apps/mobile',
   'apps/desktop',
+  'packages/auth',
+  'packages/ports',
+  'packages/protocol',
+  'packages/providers',
   'packages/runtime',
-  'packages/shared',
+  'packages/sessions',
+  'packages/ui',
 ]
 
 function readText(relativePath: string) {
