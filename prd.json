@@ -192,7 +192,9 @@
         "The web client can review diffs and respond to approvals",
         "The web client can open forwarded HTTP previews"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Expanded apps/web/src/index.ts from a stub into a typed web control-plane client with token sign-in, concurrent dashboard loading for hosts/workspaces/sessions/approvals/ports, authenticated live event streaming, diff review helpers, approval decisions, preview URL resolution, and a browser document renderer. Added a served browser client at / and /app via apps/server/src/web-client.ts plus apps/server/src/index.ts so the control plane exposes a usable web UI for session supervision, approvals, diff inspection, and forwarded HTTP previews. Added .agents/ralph/tests/us-014-provide-web-client.test.ts coverage for the served web page, sign-in dashboard reads, live session-event streaming, diff review, approval response, and HTTP preview opening, and verified with pnpm verify:ralph."
     },
     {
       "id": "US-015",

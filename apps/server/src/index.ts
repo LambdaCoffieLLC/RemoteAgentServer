@@ -40,6 +40,7 @@ import {
   type SessionWorkspaceMode,
   type SessionWorktreeMetadata,
 } from '@remote-agent/sessions'
+import { renderControlPlaneWebClientDocument } from './web-client.js'
 
 const hostId = 'host_control_plane' as HostId
 const workspaceId = 'workspace_server' as WorkspaceId
@@ -935,6 +936,11 @@ export class ControlPlaneServer {
     const pathSegments = url.pathname.split('/').filter(Boolean)
 
     try {
+      if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/app')) {
+        this.writeHtml(response, 200, renderControlPlaneWebClientDocument())
+        return
+      }
+
       if (request.method === 'POST' && url.pathname === '/v1/runtime/enroll') {
         if (!this.authorizeBootstrapToken(request, response)) {
           return
@@ -1713,6 +1719,14 @@ export class ControlPlaneServer {
       'Content-Type': 'application/json; charset=utf-8',
     })
     response.end(JSON.stringify(payload))
+  }
+
+  private writeHtml(response: ServerResponse<IncomingMessage>, statusCode: number, body: string) {
+    response.writeHead(statusCode, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    })
+    response.end(body)
   }
 
   private writeError(response: ServerResponse<IncomingMessage>, statusCode: number, code: string, message: string) {
