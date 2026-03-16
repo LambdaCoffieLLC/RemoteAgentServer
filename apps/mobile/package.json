@@ -2,20 +2,32 @@
   "name": "@remote-agent-server/mobile",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "src/index.ts",
-  "files": ["dist"],
+  "main": "index.ts",
+  "types": "dist/src/index.d.ts",
   "dependencies": {
     "@remote-agent-server/auth": "workspace:*",
     "@remote-agent-server/ports": "workspace:*",
     "@remote-agent-server/protocol": "workspace:*",
     "@remote-agent-server/providers": "workspace:*",
     "@remote-agent-server/sessions": "workspace:*",
-    "@remote-agent-server/ui": "workspace:*"
+    "@remote-agent-server/ui": "workspace:*",
+    "expo": "~55.0.6",
+    "expo-secure-store": "~55.0.8",
+    "expo-status-bar": "~55.0.4",
+    "expo-web-browser": "~55.0.9",
+    "react": "19.2.0",
+    "react-native": "0.83.2",
+    "react-native-sse": "1.2.1"
   },
   "scripts": {
+    "android": "expo start --android",
     "build": "tsc -p tsconfig.json",
-    "lint": "eslint src --ext .ts",
+    "ios": "expo start --ios",
+    "lint": "eslint App.tsx index.ts src --ext .ts,.tsx",
+    "start": "expo start",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.14"
   }
 }

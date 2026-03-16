@@ -238,7 +238,9 @@
         "The mobile app persists its connection settings or token securely enough for a single-user self-hosted setup",
         "The mobile app has smoke or integration coverage for the primary operator flow"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a runnable Expo mobile app in apps/mobile with documented start, ios, android, and build commands; added a real React Native operator UI for token-based sign-in, host and session browsing, live control-plane event streaming, approval decisions, and forwarded HTTP preview opening in-app or via the system browser; persisted the saved base URL and operator token with Expo SecureStore for this single-user self-hosted setup; updated README.md with local run and manual smoke instructions; and added product-owned smoke coverage in tests/mobile-app-smoke.test.ts for sign-in, live session updates, approval handling, preview opening, and stored-connection bootstrap. Verified with pnpm verify."
     },
     {
       "id": "US-016",

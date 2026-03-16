@@ -11,6 +11,7 @@ REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
 REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
 pnpm --filter @remote-agent-server/server dev
 pnpm --filter @remote-agent-server/web dev
+pnpm --filter @remote-agent-server/mobile start
 pnpm --filter @remote-agent-server/web build
 pnpm build
 pnpm lint
@@ -80,6 +81,46 @@ With the control plane running and seeded with at least one host, workspace, and
 4. Open a session review from the Sessions panel and page through its diff.
 5. Approve or reject a pending privileged action from the Approvals panel.
 6. Open a shared HTTP preview from the Forwarded previews panel.
+
+## Mobile App
+
+The mobile app at `apps/mobile` is now a runnable Expo client for the same operator workflow. It supports:
+
+- token-based sign-in against a control-plane base URL
+- browsing registered hosts and live sessions
+- streaming real-time session and approval updates from `/api/events`
+- approving or rejecting pending privileged actions
+- opening shared HTTP previews either in-app or in the system browser
+- securely persisting the saved base URL and operator token with Expo SecureStore for this single-user self-hosted MVP
+
+### Local Run
+
+Start the control plane first. Then launch Expo from the repo root:
+
+```bash
+pnpm --filter @remote-agent-server/mobile start
+pnpm --filter @remote-agent-server/mobile ios
+pnpm --filter @remote-agent-server/mobile android
+```
+
+Use the printed QR code or simulator shortcut. When signing in from a physical device, use a control-plane URL that is reachable from the phone, such as your machine's LAN IP (`http://192.168.1.15:4318`) instead of `127.0.0.1`.
+
+The mobile package also keeps a TypeScript build target for workspace verification:
+
+```bash
+pnpm --filter @remote-agent-server/mobile build
+```
+
+### Mobile Smoke Path
+
+With the control plane running and seeded with at least one host, workspace, and shared HTTP forward:
+
+1. Open the Expo app and enter the control-plane URL plus operator token.
+2. Confirm the mobile dashboard lists the enrolled host and any active sessions.
+3. Start or wait for a session and confirm the session card updates as live `session.*` and `approval.*` events arrive.
+4. Approve or reject a pending privileged action from the Pending approvals section.
+5. Open a shared HTTP preview with either `In app` or `Browser`.
+6. Close and relaunch the Expo app to confirm the saved control-plane URL and token reconnect automatically.
 
 ## Remote Linux Runtime Install
 

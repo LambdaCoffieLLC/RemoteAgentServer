@@ -1,50 +1,37 @@
-import { createAuthPolicy, type AuthPolicy } from '@remote-agent-server/auth'
-import { createManagedPort, type ManagedPort } from '@remote-agent-server/ports'
-import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
-import { createProviderDescriptor, type ProviderDescriptor } from '@remote-agent-server/providers'
-import { createSessionDescriptor, type SessionDescriptor } from '@remote-agent-server/sessions'
-import { createNavigationItem, createStatusBadge, type NavigationItem, type StatusBadge } from '@remote-agent-server/ui'
+import { createAuthPolicy } from '@remote-agent-server/auth'
+import { createManagedPort } from '@remote-agent-server/ports'
+import type { ProtocolEnvelope } from '@remote-agent-server/protocol'
+import { getProviderDisplayName } from '@remote-agent-server/providers'
+import { isTerminalSessionState } from '@remote-agent-server/sessions'
+import { createNavigationItem, createStatusBadge } from '@remote-agent-server/ui'
 
-export interface MobileManifest {
-  id: string
-  kind: 'mobile'
-  auth: AuthPolicy
-  session: SessionDescriptor
-  provider: ProviderDescriptor
-  previewPort: ManagedPort
-  tabs: NavigationItem[]
-  status: StatusBadge
-  notifications: ProtocolEnvelope<{ sessionId: string }>
+export const mobileAuthPolicy = createAuthPolicy(['operator-token'])
+export const mobileNavigation = [
+  createNavigationItem('sessions', 'Sessions', '/sessions'),
+  createNavigationItem('approvals', 'Approvals', '/approvals'),
+  createNavigationItem('previews', 'Previews', '/previews'),
+]
+export const mobileStatusBadge = createStatusBadge('Live control', 'info')
+export const mobilePreviewPort = createManagedPort({
+  id: 'mobile-preview-template',
+  port: 4318,
+  protocol: 'http',
+  visibility: 'shared',
+  state: 'forwarded',
+})
+
+export function describeMobileSessionState(
+  state: Parameters<typeof isTerminalSessionState>[0],
+  envelope?: ProtocolEnvelope<{ sessionId?: string }>,
+) {
+  const detail = envelope?.payload.sessionId ? ` for ${envelope.payload.sessionId}` : ''
+  return isTerminalSessionState(state)
+    ? `Session finished${detail}`
+    : `${getProviderDisplayName('codex')} operator flow is ${state}${detail}`
 }
 
-export function createMobileManifest(): MobileManifest {
-  const provider = createProviderDescriptor('opencode', 'opencode')
-  const session = createSessionDescriptor({
-    id: 'mobile-session-1',
-    workspaceId: 'workspace-phone',
-    provider: provider.kind,
-    state: 'blocked',
-  })
-
-  return {
-    id: createWorkspacePackageId('mobile'),
-    kind: 'mobile',
-    auth: createAuthPolicy(['operator-token']),
-    session,
-    provider,
-    previewPort: createManagedPort({
-      id: 'mobile-preview',
-      port: 8080,
-      protocol: 'http',
-      visibility: 'private',
-    }),
-    tabs: [
-      createNavigationItem('sessions', 'Sessions', '/sessions'),
-      createNavigationItem('approvals', 'Approvals', '/approvals'),
-    ],
-    status: createStatusBadge('Attention needed', 'warning'),
-    notifications: createProtocolEnvelope('session.blocked', 'mobile', {
-      sessionId: session.id,
-    }),
-  }
-}
+export * from './client.js'
+export * from './controller.js'
+export * from './preview.js'
+export * from './storage.js'
+export * from './types.js'
