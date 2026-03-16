@@ -151,7 +151,9 @@
         "Approval decisions are stored in an audit log",
         "Rejected actions are surfaced cleanly to the running session"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended packages/providers/src/index.ts with a shared provider approval callback contract and rejection error, then updated apps/runtime/src/index.ts so provider adapters can request privileged-action approval, record approval outcomes, and fail sessions cleanly when a reviewer rejects an action. Updated apps/server/src/index.ts so approval requests and decisions append to a persisted audit log and rejected approvals emit session log events for the affected running session. Added .agents/ralph/tests/us-011-approve-privileged-actions.test.ts coverage for provider-driven approval requests, client approve/reject flows, audit-log persistence, and clean rejection surfacing, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-012",

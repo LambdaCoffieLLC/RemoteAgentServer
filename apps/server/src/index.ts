@@ -50,6 +50,9 @@ export type HostPlatform = 'linux' | 'macos' | 'windows'
 export type HostRuntimeStatus = 'online' | 'offline' | 'degraded'
 export type ApprovalId = `approval_${string}`
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
+export type AuditLogId = `audit_${string}`
+export type AuditLogAction = 'approval.requested' | 'approval.approved' | 'approval.rejected'
+export type AuditLogOutcome = 'requested' | 'approved' | 'rejected'
 export type NotificationId = `notification_${string}`
 export type NotificationCategory = 'approval-required' | 'session-status' | 'port-exposed'
 
@@ -97,6 +100,18 @@ export interface ApprovalRecord {
   decidedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
 }
 
+export interface AuditLogRecord {
+  id: AuditLogId
+  action: AuditLogAction
+  actor: Pick<AuthenticatedActor, 'id' | 'displayName'>
+  targetType: 'approval'
+  targetId: ApprovalId
+  sessionId: SessionId
+  outcome: AuditLogOutcome
+  message: string
+  createdAt: IsoTimestamp
+}
+
 export interface NotificationRecord {
   id: NotificationId
   category: NotificationCategory
@@ -114,6 +129,7 @@ export interface ControlPlaneState {
   sessions: SessionSummary[]
   sessionEvents: SessionEvent[]
   approvals: ApprovalRecord[]
+  auditLog: AuditLogRecord[]
   ports: ForwardedPort[]
   notifications: NotificationRecord[]
 }
@@ -268,6 +284,7 @@ const emptyState: ControlPlaneState = {
   sessions: [],
   sessionEvents: [],
   approvals: [],
+  auditLog: [],
   ports: [],
   notifications: [],
 }
@@ -667,17 +684,22 @@ export class ControlPlaneServer {
 
   async createApproval(input: CreateApprovalInput, actor?: AuthenticatedActor) {
     this.getSession(input.sessionId)
+    const requestActor = input.requestedBy ?? pickActorIdentity(actor)
 
     const approval: ApprovalRecord = {
       id: input.id,
       sessionId: input.sessionId,
       action: input.action,
-      requestedBy: input.requestedBy ?? pickActorIdentity(actor),
+      requestedBy: requestActor,
       requestedAt: input.requestedAt ?? this.clock(),
       status: 'pending',
     }
 
     this.state.approvals = upsertRecord(this.state.approvals, approval)
+    this.state.auditLog = [
+      ...this.state.auditLog,
+      this.buildApprovalAuditLogRecord(approval, 'approval.requested', 'requested', requestActor),
+    ]
     await this.persistState()
     this.publishEvent('approval.requested', { approval })
     await this.createNotification({
@@ -693,16 +715,48 @@ export class ControlPlaneServer {
 
   async decideApproval(id: ApprovalId, input: DecideApprovalInput, actor?: AuthenticatedActor) {
     const current = this.getApproval(id)
+
+    if (current.status !== 'pending') {
+      throw new ControlPlaneRequestError(409, 'approval_already_decided', `Approval ${id} has already been ${current.status}.`)
+    }
+
+    const decisionActor = input.decidedBy ?? pickActorIdentity(actor)
     const updated: ApprovalRecord = {
       ...current,
       status: input.status,
       decidedAt: this.clock(),
-      decidedBy: input.decidedBy ?? pickActorIdentity(actor),
+      decidedBy: decisionActor,
     }
 
     this.state.approvals = upsertRecord(this.state.approvals, updated)
+    this.state.auditLog = [
+      ...this.state.auditLog,
+      this.buildApprovalAuditLogRecord(
+        updated,
+        input.status === 'approved' ? 'approval.approved' : 'approval.rejected',
+        input.status,
+        decisionActor,
+      ),
+    ]
+
+    let rejectionSessionEvent: SessionEvent | undefined
+
+    if (input.status === 'rejected') {
+      rejectionSessionEvent = this.buildSessionEvent(updated.sessionId, {
+        kind: 'log',
+        level: 'warn',
+        message: `Privileged action rejected: ${updated.action}.`,
+      })
+      this.state.sessionEvents = [...this.state.sessionEvents, rejectionSessionEvent]
+    }
+
     await this.persistState()
     this.publishEvent('approval.decided', { approval: updated })
+
+    if (rejectionSessionEvent) {
+      this.publishEvent('session.event.created', { sessionEvent: rejectionSessionEvent })
+    }
+
     return updated
   }
 
@@ -1376,6 +1430,25 @@ export class ControlPlaneServer {
     return sequence + 1
   }
 
+  private buildApprovalAuditLogRecord(
+    approval: ApprovalRecord,
+    action: AuditLogAction,
+    outcome: AuditLogOutcome,
+    actor: Pick<AuthenticatedActor, 'id' | 'displayName'>,
+  ): AuditLogRecord {
+    return {
+      id: toAuditLogId(approval.id, this.state.auditLog.length + 1),
+      action,
+      actor: { ...actor },
+      targetType: 'approval',
+      targetId: approval.id,
+      sessionId: approval.sessionId,
+      outcome,
+      message: `${approval.action} ${outcome}.`,
+      createdAt: this.clock(),
+    }
+  }
+
   private async maybeCreateSessionNotification(session: SessionSummary) {
     if (!['completed', 'failed'].includes(session.status)) {
       return
@@ -1475,6 +1548,10 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
     sessions: (seedState?.sessions ?? emptyState.sessions).map((session) => createSessionSummary(session)),
     sessionEvents: (seedState?.sessionEvents ?? emptyState.sessionEvents).map((event) => createSessionEvent(event)),
     approvals: [...(seedState?.approvals ?? emptyState.approvals)],
+    auditLog: (seedState?.auditLog ?? emptyState.auditLog).map((entry) => ({
+      ...entry,
+      actor: { ...entry.actor },
+    })),
     ports: [...(seedState?.ports ?? emptyState.ports)],
     notifications: [...(seedState?.notifications ?? emptyState.notifications)],
   }
@@ -1497,6 +1574,10 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
       ...approval,
       requestedBy: { ...approval.requestedBy },
       decidedBy: approval.decidedBy ? { ...approval.decidedBy } : undefined,
+    })),
+    auditLog: state.auditLog.map((entry) => ({
+      ...entry,
+      actor: { ...entry.actor },
     })),
     ports: state.ports.map((port) => createForwardedPort(port)),
     notifications: state.notifications.map((notification) => ({ ...notification })),
@@ -1521,6 +1602,10 @@ function pickActorIdentity(actor?: AuthenticatedActor) {
 
 function toNotificationId(id: string): NotificationId {
   return `notification_${id.replace(/^[^_]+_/, '')}`
+}
+
+function toAuditLogId(approvalId: ApprovalId, sequence: number): AuditLogId {
+  return `audit_${approvalId.replace(/^approval_/, '')}_${sequence}`
 }
 
 function toSessionEventId(sessionId: SessionId, sequence: number) {

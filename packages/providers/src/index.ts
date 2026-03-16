@@ -5,6 +5,13 @@ export type ProviderAdapterEventKind = 'status' | 'log' | 'output'
 export type ProviderAdapterEventStatus = 'running' | 'completed' | 'failed'
 export type ProviderAdapterLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type ProviderAdapterOutputStream = 'stdout' | 'stderr'
+export type ProviderApprovalDecision = 'approved' | 'rejected'
+
+export interface ProviderApprovalRequest {
+  approvalId: `approval_${string}`
+  action: string
+  reason?: string
+}
 
 export interface ProviderDescriptor {
   id: ProviderId
@@ -24,6 +31,8 @@ export interface ProviderLaunchRequest {
   workspacePath: string
   prompt: string
   env?: Record<string, string | undefined>
+  // eslint-disable-next-line no-unused-vars
+  requestApproval?: (request: ProviderApprovalRequest) => Promise<ProviderApprovalDecision>
 }
 
 export interface ProviderRuntimeIO {
@@ -86,5 +95,18 @@ export function createProviderAdapterRegistry(adapters: readonly ProviderAdapter
     list() {
       return [...adapterMap.values()]
     },
+  }
+}
+
+export class ProviderApprovalRejectedError extends Error {
+  readonly approvalId: ProviderApprovalRequest['approvalId']
+
+  readonly action: string
+
+  constructor(request: ProviderApprovalRequest, message = `Approval rejected for ${request.action}.`) {
+    super(message)
+    this.name = 'ProviderApprovalRejectedError'
+    this.approvalId = request.approvalId
+    this.action = request.action
   }
 }

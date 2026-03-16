@@ -20,6 +20,9 @@ import {
   createProviderAdapterRegistry,
   type ProviderAdapter,
   type ProviderAdapterEvent,
+  type ProviderApprovalDecision,
+  type ProviderApprovalRequest,
+  ProviderApprovalRejectedError,
   type ProviderAdapterRegistry,
   type ProviderCommandSpec,
   type ProviderId,
@@ -32,6 +35,8 @@ export { createProviderAdapterRegistry }
 export type {
   ProviderAdapter,
   ProviderAdapterEvent,
+  ProviderApprovalDecision,
+  ProviderApprovalRequest,
   ProviderAdapterRegistry,
   ProviderCommandSpec,
   ProviderLaunchRequest,
@@ -134,6 +139,7 @@ export interface CoreProviderAdapterOptions {
 export interface RuntimeSessionManagerOptions {
   clock?: () => IsoTimestamp
   providerRegistry?: ProviderAdapterRegistry
+  approvalHandler?: RuntimeApprovalHandler
 }
 
 export interface StartRuntimeSessionOptions {
@@ -151,12 +157,36 @@ export interface StartRuntimeSessionOptions {
 export interface RuntimeManagedSession {
   session: SessionSummary
   events: SessionEvent[]
+  approvals: RuntimeApprovalRecord[]
   command?: ProviderCommandSpec
   failure?: {
     provider: ProviderId
     message: string
   }
 }
+
+export interface RuntimeApprovalRecord extends ProviderApprovalRequest {
+  sessionId: SessionId
+  provider: ProviderId
+  requestedAt: IsoTimestamp
+  requestedBy: SessionSummary['requestedBy']
+  status: 'pending' | ProviderApprovalDecision
+  decidedAt?: IsoTimestamp
+  decidedBy?: SessionSummary['requestedBy']
+}
+
+export type RuntimeApprovalHandlerDecision =
+  | ProviderApprovalDecision
+  | {
+      status: ProviderApprovalDecision
+      decidedBy?: SessionSummary['requestedBy']
+      message?: string
+    }
+
+export type RuntimeApprovalHandler = (
+  // eslint-disable-next-line no-unused-vars
+  approval: RuntimeApprovalRecord,
+) => Promise<RuntimeApprovalHandlerDecision> | RuntimeApprovalHandlerDecision
 
 export function describeRuntimeApp() {
   const provider = coreProviderDescriptors.find(({ id }) => id === 'opencode') ?? coreProviderDescriptors[0]
@@ -206,9 +236,12 @@ export class RuntimeSessionManager {
 
   private readonly providerRegistry: ProviderAdapterRegistry
 
+  private readonly approvalHandler?: RuntimeApprovalHandler
+
   constructor(options: RuntimeSessionManagerOptions = {}) {
     this.clock = options.clock ?? (() => new Date().toISOString())
     this.providerRegistry = options.providerRegistry ?? createRuntimeProviderRegistry()
+    this.approvalHandler = options.approvalHandler
   }
 
   async startSession(options: StartRuntimeSessionOptions): Promise<RuntimeManagedSession> {
@@ -241,6 +274,7 @@ export class RuntimeSessionManager {
         message: `Session started with provider ${options.provider}.`,
       }),
     ]
+    const approvals: RuntimeApprovalRecord[] = []
 
     try {
       const handle = await adapter.launchSession({
@@ -248,6 +282,74 @@ export class RuntimeSessionManager {
         workspacePath: options.workspacePath,
         prompt: options.prompt,
         env: options.env,
+        requestApproval: async (request) => {
+          const pendingApproval: RuntimeApprovalRecord = {
+            ...request,
+            sessionId: options.id,
+            provider: options.provider,
+            requestedAt: this.clock(),
+            requestedBy: session.requestedBy,
+            status: 'pending',
+          }
+          approvals.push(pendingApproval)
+          events.push(
+            createSessionEvent({
+              id: toRuntimeSessionEventId(options.id, events.length + 1),
+              sessionId: options.id,
+              sequence: events.length + 1,
+              kind: 'log',
+              createdAt: this.clock(),
+              level: 'warn',
+              message: describeApprovalRequiredMessage(request),
+            }),
+          )
+
+          const decision = normalizeApprovalDecision(await this.resolveApprovalDecision(pendingApproval))
+          const decidedApproval: RuntimeApprovalRecord = {
+            ...pendingApproval,
+            status: decision.status,
+            decidedAt: this.clock(),
+            decidedBy: decision.decidedBy,
+          }
+
+          approvals[approvals.length - 1] = decidedApproval
+          events.push(
+            createSessionEvent({
+              id: toRuntimeSessionEventId(options.id, events.length + 1),
+              sessionId: options.id,
+              sequence: events.length + 1,
+              kind: 'log',
+              createdAt: this.clock(),
+              level: decision.status === 'approved' ? 'info' : 'warn',
+              message:
+                decision.message ??
+                (decision.status === 'approved'
+                  ? `Approval approved for ${request.action}.`
+                  : `Approval rejected for ${request.action}.`),
+            }),
+          )
+
+          if (decision.status === 'rejected') {
+            session = createSessionSummary({
+              ...session,
+              status: 'failed',
+            })
+            events.push(
+              createSessionEvent({
+                id: toRuntimeSessionEventId(options.id, events.length + 1),
+                sessionId: options.id,
+                sequence: events.length + 1,
+                kind: 'status',
+                createdAt: this.clock(),
+                status: 'failed',
+                message: 'Session failed because a privileged action was rejected.',
+              }),
+            )
+            throw new ProviderApprovalRejectedError(request, decision.message ?? `Approval rejected for ${request.action}.`)
+          }
+
+          return decision.status
+        },
       })
       const runtime = createProviderRuntimeIO(handle.command)
       const adapterEvents = await handle.monitor(runtime)
@@ -267,32 +369,41 @@ export class RuntimeSessionManager {
       return {
         session,
         events,
+        approvals,
         command: handle.command,
       }
     } catch (error) {
       const message = toErrorMessage(error)
-      events.push(
-        createSessionEvent({
-          id: toRuntimeSessionEventId(options.id, events.length + 1),
-          sessionId: options.id,
-          sequence: events.length + 1,
-          kind: 'log',
-          createdAt: this.clock(),
-          level: 'error',
-          message: `${adapter.descriptor.displayName} failed: ${message}`,
-        }),
-      )
-      events.push(
-        createSessionEvent({
-          id: toRuntimeSessionEventId(options.id, events.length + 1),
-          sessionId: options.id,
-          sequence: events.length + 1,
-          kind: 'status',
-          createdAt: this.clock(),
-          status: 'failed',
-          message: `Session failed with provider ${options.provider}.`,
-        }),
-      )
+      if (!(error instanceof ProviderApprovalRejectedError)) {
+        events.push(
+          createSessionEvent({
+            id: toRuntimeSessionEventId(options.id, events.length + 1),
+            sessionId: options.id,
+            sequence: events.length + 1,
+            kind: 'log',
+            createdAt: this.clock(),
+            level: 'error',
+            message: `${adapter.descriptor.displayName} failed: ${message}`,
+          }),
+        )
+      }
+
+      if (events.at(-1)?.kind !== 'status' || events.at(-1)?.status !== 'failed') {
+        events.push(
+          createSessionEvent({
+            id: toRuntimeSessionEventId(options.id, events.length + 1),
+            sessionId: options.id,
+            sequence: events.length + 1,
+            kind: 'status',
+            createdAt: this.clock(),
+            status: 'failed',
+            message:
+              error instanceof ProviderApprovalRejectedError
+                ? 'Session failed because a privileged action was rejected.'
+                : `Session failed with provider ${options.provider}.`,
+          }),
+        )
+      }
       session = createSessionSummary({
         ...session,
         status: 'failed',
@@ -301,12 +412,24 @@ export class RuntimeSessionManager {
       return {
         session,
         events,
+        approvals,
         failure: {
           provider: options.provider,
           message,
         },
       }
     }
+  }
+
+  private async resolveApprovalDecision(approval: RuntimeApprovalRecord): Promise<RuntimeApprovalHandlerDecision> {
+    if (!this.approvalHandler) {
+      return {
+        status: 'rejected',
+        message: `Approval rejected for ${approval.action} because no approval handler is configured.`,
+      }
+    }
+
+    return this.approvalHandler(approval)
   }
 
   private createSessionEventFromAdapter(sessionId: SessionId, sequence: number, event: ProviderAdapterEvent): SessionEvent {
@@ -564,6 +687,30 @@ function splitOutputLines(value: string) {
     .split(/\r?\n/u)
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0)
+}
+
+function describeApprovalRequiredMessage(request: ProviderApprovalRequest) {
+  if (request.reason?.trim()) {
+    return `Approval required for ${request.action}: ${request.reason.trim()}`
+  }
+
+  return `Approval required for ${request.action}.`
+}
+
+function normalizeApprovalDecision(decision: RuntimeApprovalHandlerDecision) {
+  if (typeof decision === 'string') {
+    return {
+      status: decision,
+      decidedBy: undefined,
+      message: undefined,
+    }
+  }
+
+  return {
+    status: decision.status,
+    decidedBy: decision.decidedBy,
+    message: decision.message,
+  }
 }
 
 function createRuntimeStatus(id: RuntimeId, version: string): RuntimeStatusSnapshot {
