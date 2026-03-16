@@ -5,6 +5,7 @@ import { createProviderDescriptor, type ProviderDescriptor } from '@remote-agent
 import { createSessionDescriptor, type SessionDescriptor } from '@remote-agent-server/sessions'
 
 export * from './status.js'
+export * from './provider-adapters.js'
 export * from './session-manager.js'
 
 export interface RuntimeManifest {

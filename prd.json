@@ -131,7 +131,9 @@
         "Provider-specific failures are surfaced without crashing the session manager",
         "Each provider adapter has contract coverage for launch, output capture, exit handling, and failure reporting"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a runtime-owned provider adapter contract in packages/runtime/src/provider-adapters.ts and exported it from @remote-agent-server/runtime, with built-in Claude Code, Codex, and OpenCode adapters all launched through the shared runtime session manager. Reworked packages/runtime/src/session-manager.ts so provider launch, output, exit, pause/resume, and provider-specific failures flow through that adapter interface and failures transition the session to failed with preserved logs instead of crashing the manager. Documented the adapter-backed session behavior in README.md and added contract coverage in tests/runtime-provider-adapters.test.ts for each provider's launch, output capture, exit handling, and failure reporting, while retaining server/runtime integration coverage in tests/server-control-plane.test.ts. Verified with pnpm lint, pnpm build, pnpm typecheck, and node --import tsx --test tests/server-control-plane.test.ts tests/runtime-provider-adapters.test.ts."
     },
     {
       "id": "US-009",

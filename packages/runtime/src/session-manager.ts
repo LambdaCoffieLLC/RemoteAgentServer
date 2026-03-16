@@ -10,17 +10,15 @@ import {
   type SessionOutputEntry,
   type SessionState,
 } from '@remote-agent-server/sessions'
-import { type ProviderKind } from '@remote-agent-server/providers'
+import {
+  createRuntimeProviderAdapterRegistry,
+  type RuntimeProviderAdapter,
+  type RuntimeProviderAdapterRegistry,
+  type RuntimeProviderLaunchRequest,
+  type RuntimeProviderProcess,
+} from './provider-adapters.js'
 
-type RuntimeSessionStep =
-  | { kind: 'log'; level: SessionLogEntry['level']; message: string }
-  | { kind: 'output'; stream: SessionOutputEntry['stream']; text: string }
-
-export interface RuntimeSessionStartRequest {
-  sessionId: string
-  workspaceId: string
-  workspacePath: string
-  provider: ProviderKind
+export interface RuntimeSessionStartRequest extends Omit<RuntimeProviderLaunchRequest, 'mode'> {
   mode?: SessionMode
 }
 
@@ -63,31 +61,9 @@ export interface RuntimeSessionManager {
   dispose(): void
 }
 
-const providerScripts: Record<ProviderKind, RuntimeSessionStep[]> = {
-  'claude-code': [
-    { kind: 'log', level: 'info', message: 'Collecting repository context.' },
-    { kind: 'output', stream: 'stdout', text: 'claude> reading workspace files\n' },
-    { kind: 'log', level: 'info', message: 'Drafting an implementation plan.' },
-    { kind: 'output', stream: 'stdout', text: 'claude> plan ready for execution\n' },
-    { kind: 'log', level: 'info', message: 'Applying the requested changes.' },
-  ],
-  codex: [
-    { kind: 'log', level: 'info', message: 'Inspecting the workspace before changes.' },
-    { kind: 'output', stream: 'stdout', text: 'codex> rg --files\n' },
-    { kind: 'log', level: 'info', message: 'Implementing the active user story.' },
-    { kind: 'output', stream: 'stdout', text: 'codex> apply_patch\n' },
-    { kind: 'log', level: 'info', message: 'Running verification for the session changes.' },
-  ],
-  opencode: [
-    { kind: 'log', level: 'info', message: 'Indexing the workspace.' },
-    { kind: 'output', stream: 'stdout', text: 'opencode> workspace indexed\n' },
-    { kind: 'log', level: 'info', message: 'Producing code changes.' },
-    { kind: 'output', stream: 'stdout', text: 'opencode> patch generated\n' },
-    { kind: 'log', level: 'info', message: 'Preparing a completion summary.' },
-  ],
+export interface RuntimeSessionManagerOptions {
+  providerAdapters?: RuntimeProviderAdapterRegistry | Iterable<RuntimeProviderAdapter>
 }
-
-const runtimeStepDelayMs = 40
 
 class InProcessRuntimeSession implements RuntimeSessionHandle {
   readonly id: string
@@ -96,19 +72,18 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
   private readonly logs: SessionLogEntry[] = []
   private readonly output: SessionOutputEntry[] = []
   private readonly createdAt = new Date().toISOString()
-  private readonly script: RuntimeSessionStep[]
-
   private readonly session: SessionDescriptor
   private readonly workspacePath: string
 
   private updatedAt = this.createdAt
   private startedAt?: string
   private completedAt?: string
-  private timeout?: NodeJS.Timeout
-  private nextStepIndex = 0
+  private launchTimer?: NodeJS.Timeout
+  private providerProcess?: RuntimeProviderProcess
 
   constructor(
-    request: RuntimeSessionStartRequest,
+    private readonly request: RuntimeSessionStartRequest,
+    private readonly providerAdapters: RuntimeProviderAdapterRegistry,
     private readonly onTerminal: (sessionId: string) => void,
   ) {
     this.id = request.sessionId
@@ -120,16 +95,15 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
       state: 'queued',
     })
     this.workspacePath = request.workspacePath
-    this.script = providerScripts[request.provider]
 
-    setTimeout(() => {
+    this.launchTimer = setTimeout(() => {
+      this.launchTimer = undefined
+
       if (this.session.state !== 'queued') {
         return
       }
 
-      this.startedAt = new Date().toISOString()
-      this.setState('running', `Started ${request.provider} for ${request.workspacePath}.`)
-      this.scheduleNextStep()
+      this.startProvider()
     }, 0)
   }
 
@@ -158,7 +132,7 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
       throw new Error('Only running sessions can be paused.')
     }
 
-    this.clearScheduledStep()
+    this.providerProcess?.pause()
     this.setState('paused', 'Paused by operator request.')
     return this.getSnapshot()
   }
@@ -168,8 +142,8 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
       throw new Error('Only paused sessions can be resumed.')
     }
 
+    this.providerProcess?.resume()
     this.setState('running', 'Resumed by operator request.')
-    this.scheduleNextStep()
     return this.getSnapshot()
   }
 
@@ -178,45 +152,80 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
       throw new Error('Terminal sessions cannot be canceled again.')
     }
 
-    this.clearScheduledStep()
+    this.clearLaunchTimer()
+    this.providerProcess?.cancel()
     this.pushLog('warning', 'Canceled by operator request.')
     this.setState('canceled', 'Canceled by operator request.')
     return this.getSnapshot()
   }
 
   dispose() {
-    this.clearScheduledStep()
+    this.clearLaunchTimer()
+    this.providerProcess?.dispose()
+    this.providerProcess = undefined
     this.listeners.clear()
   }
 
-  private scheduleNextStep() {
-    if (this.session.state !== 'running') {
+  private startProvider() {
+    const adapter = this.providerAdapters.getAdapter(this.request.provider)
+    if (!adapter) {
+      this.failSession(new Error(`No runtime provider adapter is registered for "${this.request.provider}".`))
       return
     }
 
-    this.timeout = setTimeout(() => {
-      this.timeout = undefined
+    this.startedAt = new Date().toISOString()
 
-      if (this.session.state !== 'running') {
-        return
-      }
+    try {
+      this.providerProcess = adapter.launch(
+        {
+          sessionId: this.request.sessionId,
+          workspaceId: this.request.workspaceId,
+          workspacePath: this.request.workspacePath,
+          provider: this.request.provider,
+          mode: this.request.mode ?? 'workspace',
+        },
+        {
+          onLog: (level, message) => {
+            if (this.isTerminal()) {
+              return
+            }
 
-      const step = this.script[this.nextStepIndex]
-      if (!step) {
-        this.pushLog('info', 'Provider finished the session workload.')
-        this.setState('completed', 'Provider completed the session successfully.')
-        return
-      }
+            this.pushLog(level, message)
+          },
+          onOutput: (stream, text) => {
+            if (this.isTerminal()) {
+              return
+            }
 
-      this.nextStepIndex += 1
-      if (step.kind === 'log') {
-        this.pushLog(step.level, step.message)
-      } else {
-        this.pushOutput(step.stream, step.text)
-      }
+            this.pushOutput(stream, text)
+          },
+          onExit: (result) => {
+            if (this.isTerminal()) {
+              return
+            }
 
-      this.scheduleNextStep()
-    }, runtimeStepDelayMs)
+            if (result.code === 0) {
+              const detail = result.detail ?? `${this.request.provider} completed the session successfully.`
+              this.pushLog('info', detail)
+              this.setState('completed', detail)
+              return
+            }
+
+            this.failSession(new Error(result.detail ?? `${this.request.provider} exited with code ${result.code}.`))
+          },
+          onFailure: (error) => {
+            if (this.isTerminal()) {
+              return
+            }
+
+            this.failSession(error)
+          },
+        },
+      )
+      this.setState('running', `Started ${this.request.provider} for ${this.request.workspacePath}.`)
+    } catch (error) {
+      this.failSession(error)
+    }
   }
 
   private pushLog(level: SessionLogEntry['level'], message: string) {
@@ -255,6 +264,9 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
     this.updatedAt = timestamp
     if (isTerminalSessionState(state)) {
       this.completedAt = timestamp
+      this.clearLaunchTimer()
+      this.providerProcess?.dispose()
+      this.providerProcess = undefined
     }
 
     this.emit({
@@ -272,11 +284,21 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
     }
   }
 
-  private clearScheduledStep() {
-    if (this.timeout) {
-      clearTimeout(this.timeout)
-      this.timeout = undefined
+  private failSession(error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unexpected provider failure.'
+    this.pushLog('error', message)
+    this.setState('failed', message)
+  }
+
+  private clearLaunchTimer() {
+    if (this.launchTimer) {
+      clearTimeout(this.launchTimer)
+      this.launchTimer = undefined
     }
+  }
+
+  private isTerminal() {
+    return isTerminalSessionState(this.session.state)
   }
 
   private emit(event: RuntimeSessionEvent) {
@@ -286,8 +308,15 @@ class InProcessRuntimeSession implements RuntimeSessionHandle {
   }
 }
 
-export function createRuntimeSessionManager(): RuntimeSessionManager {
+function isProviderAdapterRegistry(value: RuntimeSessionManagerOptions['providerAdapters']): value is RuntimeProviderAdapterRegistry {
+  return typeof value === 'object' && value !== null && 'getAdapter' in value && 'listAdapters' in value
+}
+
+export function createRuntimeSessionManager(options: RuntimeSessionManagerOptions = {}): RuntimeSessionManager {
   const sessions = new Map<string, RuntimeSessionHandle>()
+  const providerAdapters = isProviderAdapterRegistry(options.providerAdapters)
+    ? options.providerAdapters
+    : createRuntimeProviderAdapterRegistry(options.providerAdapters)
 
   return {
     startSession(request) {
@@ -295,7 +324,7 @@ export function createRuntimeSessionManager(): RuntimeSessionManager {
         throw new Error(`Session "${request.sessionId}" is already active in the runtime.`)
       }
 
-      const session = new InProcessRuntimeSession(request, (sessionId) => {
+      const session = new InProcessRuntimeSession(request, providerAdapters, (sessionId) => {
         sessions.delete(sessionId)
       })
       sessions.set(request.sessionId, session)

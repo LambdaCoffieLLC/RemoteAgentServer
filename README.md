@@ -165,6 +165,8 @@ Managed coding sessions are started through `POST /api/sessions` with:
 - `id`: optional, otherwise the control plane generates one
 - `mode`: optional, defaults to `workspace`
 
+The runtime package now exposes a common provider adapter surface and ships built-in adapters for `claude-code`, `codex`, and `opencode`. The session manager launches every provider through that same adapter contract and turns provider launch/runtime failures into failed sessions with preserved logs and output instead of crashing the runtime.
+
 The control plane starts the session against the workspace's runtime host, persists recoverable session state, and streams live runtime-originated events over `GET /api/events`:
 
 - `session.upserted` when the session record is created
