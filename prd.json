@@ -1,16 +1,28 @@
 {
   "project": "RemoteAgentServer",
-  "branchName": "main",
+  "branchName": "ralph-loop-attempt-2",
+  "deliveryStandards": [
+    "Treat this PRD as the source of truth for scope and completion. A story is not complete when it only adds typed helpers, mocks, or static examples if the story calls for a runnable app, service, installer, or workflow.",
+    "Do not mark a story passed unless the relevant surface can be run manually from this repository with documented commands.",
+    "Every story that changes behavior must add automated coverage. Minimum expectation: unit tests for new pure logic, integration tests for service and package boundaries, and end-to-end or smoke coverage for user-facing flows where practical.",
+    "Automated tests for product behavior must live with the product code or in a clearly named top-level product test suite. Ralph-only tests are useful but are not sufficient as the sole proof of completion.",
+    "When a story changes setup, architecture, commands, or user workflows, the README and any relevant supporting docs must be updated in the same story.",
+    "This phase targets a single-user self-hosted system. Auth can remain token-based, but tokens and bootstrap secrets must be configurable through environment variables or config files and must not be hardcoded as the only production path.",
+    "This phase may use JSON persistence if it is durable enough for restart recovery, well documented, and covered by tests. If JSON persistence becomes a limiter, SQLite is the preferred next persistence step.",
+    "A story that introduces a client application must deliver an actual runnable client package with explicit local run commands, not only a client SDK.",
+    "A story that introduces operational behavior must include failure handling, useful errors, and at least one documented manual smoke test path."
+  ],
   "userStories": [
     {
       "id": "US-001",
       "title": "Create a pnpm TypeScript monorepo",
       "description": "As a maintainer, I want the project organized as a pnpm monorepo with TypeScript-first tooling so that server, runtime, web, mobile, desktop, and shared packages can evolve together.",
       "acceptanceCriteria": [
-        "The repository uses pnpm workspaces",
+        "The repository uses pnpm workspaces for all first-party apps and packages",
         "All first-party apps and packages build with TypeScript",
         "Shared linting, formatting, and tsconfig rules are centralized",
-        "A root command can install, build, lint, and typecheck the full monorepo"
+        "Root commands exist for install, build, lint, typecheck, and test across the full monorepo",
+        "The root verification flow is documented and intended to be run locally and in CI"
       ],
       "priority": 1
     },
@@ -22,7 +34,8 @@
         "The monorepo includes shared packages for protocol, auth, sessions, ports, providers, and UI",
         "Server, runtime, and clients consume shared types instead of duplicating models",
         "Package boundaries are documented",
-        "Changes in shared types are validated by typecheck across all dependent apps"
+        "Changes in shared types are validated by typecheck across all dependent apps",
+        "Shared packages expose runtime-safe exports that match their declared package entrypoints"
       ],
       "priority": 1
     },
@@ -31,10 +44,13 @@
       "title": "Run a Remote Dev Console Server control plane",
       "description": "As a developer, I want a central server that manages authentication, hosts, workspaces, sessions, approvals, notifications, and port exposure so that all clients connect through one control plane.",
       "acceptanceCriteria": [
-        "The server exposes APIs for hosts, workspaces, sessions, approvals, and forwarded ports",
+        "The server exposes APIs for hosts, workspaces, sessions, approvals, notifications, and forwarded ports",
         "The server supports real-time event delivery to connected clients",
         "The server persists core metadata required to recover state after restart",
-        "Unauthorized access to protected resources is rejected"
+        "Unauthorized access to protected resources is rejected",
+        "Single-user operator tokens and bootstrap tokens are configurable through environment variables or config files and are not hardcoded as the only usable path",
+        "The server has an explicit local run command and documented configuration",
+        "The control plane has integration tests that exercise auth, persistence, and real-time event delivery"
       ],
       "priority": 1
     },
@@ -46,7 +62,9 @@
         "A documented install flow is available for supported Linux systems",
         "The runtime can enroll with the server using a bootstrap token",
         "The runtime reports version, health, and connectivity status",
-        "The install flow is safe to rerun on an already configured host"
+        "The install flow is safe to rerun on an already configured host",
+        "The repo includes a concrete installer or install helper that matches the documented flow",
+        "The install and enrollment flow has automated integration coverage"
       ],
       "priority": 1
     },
@@ -58,7 +76,8 @@
         "A local runtime can register with the server or attach directly in development mode",
         "Local workspaces support the same session APIs as remote workspaces",
         "Providers do not require separate local-only implementations",
-        "Clients clearly distinguish local and remote hosts"
+        "Clients clearly distinguish local and remote hosts",
+        "Local and remote flows share the same core runtime abstractions and tests prove the parity"
       ],
       "priority": 2
     },
@@ -70,7 +89,8 @@
         "A workspace can be created from a repository path on a registered host",
         "Workspace metadata includes host, path, default branch, and runtime association",
         "Invalid or inaccessible paths are rejected with a clear error",
-        "Users can list, inspect, and remove registered workspaces"
+        "Users can list, inspect, and remove registered workspaces",
+        "Workspace registration validates that the target path is an accessible git repository"
       ],
       "priority": 1
     },
@@ -82,7 +102,8 @@
         "A session can be started against a chosen workspace and provider",
         "Clients receive live status, logs, and output events",
         "Sessions can be paused, canceled, and resumed",
-        "Disconnected clients can reconnect and recover active session state"
+        "Disconnected clients can reconnect and recover active session state",
+        "The core session lifecycle has integration coverage across the server and runtime boundary"
       ],
       "priority": 1
     },
@@ -95,7 +116,8 @@
         "Claude Code can be launched and monitored through the adapter interface",
         "Codex can be launched and monitored through the adapter interface",
         "OpenCode can be launched and monitored through the adapter interface",
-        "Provider-specific failures are surfaced without crashing the session manager"
+        "Provider-specific failures are surfaced without crashing the session manager",
+        "Each provider adapter has contract coverage for launch, output capture, exit handling, and failure reporting"
       ],
       "priority": 1
     },
@@ -107,7 +129,8 @@
         "A session can create a dedicated worktree before starting",
         "Worktree metadata is linked to the session",
         "Dirty worktrees are rejected by default unless explicitly allowed",
-        "Users can choose direct workspace mode for simple workflows"
+        "Users can choose direct workspace mode for simple workflows",
+        "The implementation includes cleanup behavior or documented cleanup commands for stale worktrees"
       ],
       "priority": 1
     },
@@ -119,7 +142,8 @@
         "Clients can list changed files for a session",
         "Clients can view diffs or patch summaries",
         "Large diffs degrade gracefully through truncation or pagination",
-        "The change view clearly identifies added, modified, renamed, and removed files"
+        "The change view clearly identifies added, modified, renamed, and removed files",
+        "At least one user-facing client exercises the diff-review flow in an integration or smoke test"
       ],
       "priority": 1
     },
@@ -131,7 +155,8 @@
         "Providers can raise approval-required actions through a common interface",
         "Clients can approve or reject pending actions",
         "Approval decisions are stored in an audit log",
-        "Rejected actions are surfaced cleanly to the running session"
+        "Rejected actions are surfaced cleanly to the running session",
+        "The approval flow is covered by integration tests from request through decision and session outcome"
       ],
       "priority": 1
     },
@@ -144,7 +169,8 @@
         "Clients can view all active forwarded ports for a workspace or session",
         "Forwarded ports can be opened, closed, and expired",
         "HTTP services are exposed through a managed URL",
-        "At least private and shared visibility modes are supported"
+        "At least private and shared visibility modes are supported",
+        "The port-forwarding lifecycle has integration coverage including expiration behavior"
       ],
       "priority": 1
     },
@@ -156,7 +182,8 @@
         "The runtime can detect listening ports associated with active sessions or workspaces",
         "Detected ports appear in clients with suggested labels when possible",
         "Users can promote a detected port into a managed forward",
-        "Detected ports are not exposed externally until a user forwards them"
+        "Detected ports are not exposed externally until a user forwards them",
+        "Detection and promotion flows are covered by automated integration tests"
       ],
       "priority": 2
     },
@@ -165,10 +192,12 @@
       "title": "Provide a web client",
       "description": "As a developer, I want a browser-based client so that I can manage sessions, approvals, ports, and previews from any machine.",
       "acceptanceCriteria": [
-        "Users can sign in and view hosts, workspaces, sessions, and forwarded ports",
+        "The repo includes an actual runnable web app package with explicit local run and build commands",
+        "Users can sign in and view hosts, workspaces, sessions, approvals, forwarded ports, and detected ports",
         "The web client can stream live session events",
         "The web client can review diffs and respond to approvals",
-        "The web client can open forwarded HTTP previews"
+        "The web client can open forwarded HTTP previews",
+        "The web client has browser-focused integration or end-to-end smoke coverage for the core operator flow"
       ],
       "priority": 1
     },
@@ -177,10 +206,13 @@
       "title": "Provide a mobile app with React Native and Expo",
       "description": "As a developer, I want a mobile app built with React Native and Expo so that I can monitor work, approve actions, and open previews from my phone.",
       "acceptanceCriteria": [
-        "The mobile app supports authentication and host or session browsing",
+        "The repo includes an actual runnable Expo app with documented local run commands",
+        "The mobile app supports token-based authentication and host or session browsing",
         "The mobile app receives live session state updates",
         "The mobile app can approve or reject pending actions",
-        "The mobile app can open forwarded HTTP previews in-app or via the system browser"
+        "The mobile app can open forwarded HTTP previews in-app or via the system browser",
+        "The mobile app persists its connection settings or token securely enough for a single-user self-hosted setup",
+        "The mobile app has smoke or integration coverage for the primary operator flow"
       ],
       "priority": 1
     },
@@ -189,10 +221,13 @@
       "title": "Provide a desktop app",
       "description": "As a developer, I want a desktop app so that I can use Remote Dev Console as a primary control surface for both remote and local work.",
       "acceptanceCriteria": [
+        "The repo includes an actual runnable desktop app package, not only a desktop client library",
         "The desktop app can connect to the server and manage sessions",
         "The desktop app can also work with local runtime flows",
         "The desktop app reuses shared packages from the pnpm monorepo",
-        "Users can switch between local and remote workspaces in one interface"
+        "Users can switch between local and remote workspaces in one interface",
+        "The desktop app stores its token or connection secrets in a desktop-appropriate way for a single-user setup",
+        "The desktop app has smoke or integration coverage for the primary operator flow"
       ],
       "priority": 2
     },
@@ -204,7 +239,8 @@
         "Session metadata includes provider, workspace, timestamps, and current state",
         "Clients can reopen an existing session from another device",
         "Recovered sessions include recent logs and messages",
-        "Temporary disconnects do not destroy active session state"
+        "Temporary disconnects do not destroy active session state",
+        "Recovery behavior is covered by automated integration tests across more than one client surface"
       ],
       "priority": 1
     },
@@ -216,7 +252,8 @@
         "Users can opt in to notifications on supported clients",
         "The system sends notifications for approval required, failed session, and completed session events",
         "Notifications can deep-link into the related session where supported",
-        "Users can mute or customize notification categories"
+        "Users can mute or customize notification categories",
+        "At least one supported client demonstrates end-to-end notification delivery in an automated test or documented smoke flow"
       ],
       "priority": 2
     },
@@ -228,21 +265,50 @@
         "The audit log records session lifecycle events, approvals, provider choice, and port exposure changes",
         "Each entry includes actor, target, timestamp, and outcome",
         "Authorized users can inspect the audit log",
-        "Critical security-relevant events are not silently dropped"
+        "Critical security-relevant events are not silently dropped",
+        "The audit log survives restart and is covered by integration tests"
       ],
       "priority": 2
     },
     {
       "id": "US-020",
-      "title": "Document self-hosting and development workflows",
-      "description": "As a developer, I want clear documentation so that I can self-host the project, connect runtimes, and contribute to the pnpm monorepo.",
+      "title": "Document self-hosting, usage, and development workflows",
+      "description": "As a developer, I want clear documentation so that I can self-host the project, connect runtimes, run the clients, and contribute to the pnpm monorepo.",
       "acceptanceCriteria": [
+        "The root README includes a quickstart for install, local run commands, verification commands, and the main repo layout",
         "Documentation covers server deployment, runtime install, and client setup",
         "Documentation explains the pnpm monorepo layout and developer commands",
         "Documentation includes provider setup for Claude Code, Codex, and OpenCode",
-        "Documentation explains port forwarding behavior and security expectations"
+        "Documentation explains port forwarding behavior, auth expectations, and security boundaries",
+        "Documentation clearly distinguishes what is production-ready, what is MVP, and what is still incomplete"
       ],
       "priority": 2
+    },
+    {
+      "id": "US-021",
+      "title": "Establish product-owned automated test coverage",
+      "description": "As a maintainer, I want product-owned unit, integration, and end-to-end tests so that story completion is validated by the application itself rather than only by Ralph.",
+      "acceptanceCriteria": [
+        "Core shared packages have unit tests for their business logic",
+        "Server and runtime flows have integration tests that exercise real package boundaries",
+        "At least the primary operator journeys for server plus client surfaces have smoke or end-to-end coverage where practical",
+        "The root verification command runs product-owned tests in addition to Ralph loop tests",
+        "Test ownership and test scope are documented so future stories extend the right test layer"
+      ],
+      "priority": 1
+    },
+    {
+      "id": "US-022",
+      "title": "Improve the README for operators and contributors",
+      "description": "As an operator or contributor, I want a README that quickly tells me what this project is, what is runnable today, and how to work on it so that I do not need to reverse-engineer the repo.",
+      "acceptanceCriteria": [
+        "The README explains the product at a high level and names the major apps and packages",
+        "The README includes a practical quickstart for booting the control plane and any currently runnable clients",
+        "The README includes manual smoke-test commands for the MVP",
+        "The README explains the branch strategy for Ralph loop attempts and how to start a new attempt",
+        "The README links to the deeper docs for runtime install, architecture, provider setup, and security expectations"
+      ],
+      "priority": 1
     }
   ]
 }
