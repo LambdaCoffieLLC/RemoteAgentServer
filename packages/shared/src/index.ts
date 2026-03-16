@@ -1,8 +1,6 @@
-export type AppManifest = {
-  name: string
-  purpose: string
-}
-
-export function createManifest(name: string, purpose: string): AppManifest {
-  return { name, purpose }
-}
+export * from '@remote-agent/protocol'
+export * from '@remote-agent/auth'
+export * from '@remote-agent/sessions'
+export * from '@remote-agent/ports'
+export * from '@remote-agent/providers'
+export * from '@remote-agent/ui'

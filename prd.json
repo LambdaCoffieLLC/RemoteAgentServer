@@ -26,7 +26,9 @@
         "Package boundaries are documented",
         "Changes in shared types are validated by typecheck across all dependent apps"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Added focused workspace packages for protocol, auth, sessions, ports, providers, and UI primitives under packages/*, kept packages/shared as a compatibility barrel, and rewired server/runtime/web/mobile/desktop to consume shared domain types directly. Documented package boundaries in docs/shared-package-boundaries.md, added .agents/ralph/tests/us-002-shared-core-packages.test.ts coverage for package presence/app consumption/boundary docs/typecheck wiring, and verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-003",

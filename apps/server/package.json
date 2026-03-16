@@ -13,6 +13,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@remote-agent/shared": "workspace:*"
+    "@remote-agent/auth": "workspace:*",
+    "@remote-agent/ports": "workspace:*",
+    "@remote-agent/protocol": "workspace:*",
+    "@remote-agent/providers": "workspace:*",
+    "@remote-agent/sessions": "workspace:*"
   }
 }

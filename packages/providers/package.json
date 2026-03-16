@@ -1,5 +1,5 @@
 {
-  "name": "@remote-agent/shared",
+  "name": "@remote-agent/providers",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -14,13 +14,5 @@
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@remote-agent/auth": "workspace:*",
-    "@remote-agent/ports": "workspace:*",
-    "@remote-agent/protocol": "workspace:*",
-    "@remote-agent/providers": "workspace:*",
-    "@remote-agent/sessions": "workspace:*",
-    "@remote-agent/ui": "workspace:*"
   }
 }

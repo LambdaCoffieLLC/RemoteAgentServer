@@ -1,5 +1,5 @@
 {
-  "name": "@remote-agent/shared",
+  "name": "@remote-agent/ports",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -16,11 +16,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@remote-agent/auth": "workspace:*",
-    "@remote-agent/ports": "workspace:*",
-    "@remote-agent/protocol": "workspace:*",
-    "@remote-agent/providers": "workspace:*",
-    "@remote-agent/sessions": "workspace:*",
-    "@remote-agent/ui": "workspace:*"
+    "@remote-agent/protocol": "workspace:*"
   }
 }

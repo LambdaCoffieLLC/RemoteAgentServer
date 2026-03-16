@@ -38,35 +38,166 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@remote-agent/shared':
+      '@remote-agent/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
 
   apps/mobile:
     dependencies:
-      '@remote-agent/shared':
+      '@remote-agent/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
 
   apps/runtime:
     dependencies:
-      '@remote-agent/shared':
+      '@remote-agent/ports':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
 
   apps/server:
     dependencies:
-      '@remote-agent/shared':
+      '@remote-agent/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
 
   apps/web:
     dependencies:
-      '@remote-agent/shared':
+      '@remote-agent/auth':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../../packages/ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../../packages/sessions
+      '@remote-agent/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
 
-  packages/shared: {}
+  packages/auth:
+    dependencies:
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/ports:
+    dependencies:
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/protocol: {}
+
+  packages/providers: {}
+
+  packages/sessions:
+    dependencies:
+      '@remote-agent/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../providers
+
+  packages/shared:
+    dependencies:
+      '@remote-agent/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../sessions
+      '@remote-agent/ui':
+        specifier: workspace:*
+        version: link:../ui
+
+  packages/ui:
+    dependencies:
+      '@remote-agent/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@remote-agent/ports':
+        specifier: workspace:*
+        version: link:../ports
+      '@remote-agent/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@remote-agent/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@remote-agent/sessions':
+        specifier: workspace:*
+        version: link:../sessions
 
 packages:
 

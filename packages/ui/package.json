@@ -1,11 +1,14 @@
 {
-  "name": "@remote-agent/web",
+  "name": "@remote-agent/ui",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "types": "./src/index.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,7 +20,6 @@
     "@remote-agent/ports": "workspace:*",
     "@remote-agent/protocol": "workspace:*",
     "@remote-agent/providers": "workspace:*",
-    "@remote-agent/sessions": "workspace:*",
-    "@remote-agent/ui": "workspace:*"
+    "@remote-agent/sessions": "workspace:*"
   }
 }
