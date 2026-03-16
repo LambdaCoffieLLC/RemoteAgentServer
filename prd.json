@@ -12,7 +12,9 @@
         "Shared linting, formatting, and tsconfig rules are centralized",
         "A root command can install, build, lint, and typecheck the full monorepo"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Added pnpm-workspace.yaml with apps/* and packages/* workspaces, scaffolded TypeScript-first server/runtime/web/mobile/desktop/shared packages, centralized tooling under tooling/{tsconfig,eslint,prettier}, and root build/lint/typecheck scripts. Added .agents/ralph/tests/us-001-monorepo.test.ts coverage and verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-002",

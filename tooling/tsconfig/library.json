@@ -1,0 +1,6 @@
+{
+  "extends": "./app.json",
+  "compilerOptions": {
+    "declaration": true
+  }
+}
