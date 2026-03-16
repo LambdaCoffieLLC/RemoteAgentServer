@@ -221,7 +221,9 @@
         "The web client can open forwarded HTTP previews",
         "The web client has browser-focused integration or end-to-end smoke coverage for the core operator flow"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a runnable Vite-based browser client in apps/web with documented dev/build/preview commands, persisted operator sign-in, inventory views for hosts/workspaces/sessions/approvals/forwarded ports/detected ports, authenticated live event streaming over /api/events, session diff review, approval decisions, and shared HTTP preview links. Extended the control plane only where needed for the web surface by adding permissive CORS headers for bearer-token browser access and an includeDetected=true read path on GET /api/ports. Added browser-focused product coverage in tests/web-client-smoke.test.ts that renders the real DOM app against a live control plane and exercises sign-in, live events, diff review, approval handling, preview links, and detected-port visibility. Verified with pnpm verify."
     },
     {
       "id": "US-015",

@@ -2,8 +2,8 @@
   "name": "@remote-agent-server/web",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "src/index.ts",
+  "main": "dist/lib/index.js",
+  "types": "dist/lib/index.d.ts",
   "files": ["dist"],
   "dependencies": {
     "@remote-agent-server/auth": "workspace:*",
@@ -13,9 +13,14 @@
     "@remote-agent-server/sessions": "workspace:*",
     "@remote-agent-server/ui": "workspace:*"
   },
+  "devDependencies": {
+    "vite": "^7.1.7"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.lib.json && tsc -p tsconfig.json --noEmit && vite build",
+    "dev": "vite",
     "lint": "eslint src --ext .ts",
+    "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

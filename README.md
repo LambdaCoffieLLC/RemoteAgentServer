@@ -10,6 +10,8 @@ pnpm --filter @remote-agent-server/server build
 REMOTE_AGENT_SERVER_OPERATOR_TOKENS=operator-dev-token \
 REMOTE_AGENT_SERVER_BOOTSTRAP_TOKENS=bootstrap-dev-token \
 pnpm --filter @remote-agent-server/server dev
+pnpm --filter @remote-agent-server/web dev
+pnpm --filter @remote-agent-server/web build
 pnpm build
 pnpm lint
 pnpm typecheck
@@ -32,6 +34,52 @@ The server app at `apps/server` is now a runnable control plane for the single-u
 - real-time server-sent events at `/api/events`
 
 `GET /health` is public. The API surfaces require an operator token, except `POST /api/hosts`, which also accepts a bootstrap token so runtimes can enroll.
+
+For the browser client, the control plane also sends permissive CORS headers for this single-user bearer-token setup so the web app can connect directly from a different origin during development or self-hosted deployment.
+
+## Web Client
+
+The web app at `apps/web` is now a runnable browser client. It lets an operator sign in with a control-plane URL plus operator token and then view:
+
+- hosts
+- workspaces
+- sessions
+- approvals
+- forwarded ports
+- detected ports
+
+The UI also streams live session events, reviews changed files and paginated diffs, sends approval decisions, and exposes shared HTTP preview links.
+
+### Local Run
+
+Start the control plane first, then in a second terminal run:
+
+```bash
+pnpm --filter @remote-agent-server/web dev
+```
+
+Open the printed Vite URL in a browser and sign in with:
+
+- server URL: `http://127.0.0.1:4318`
+- operator token: `operator-dev-token`
+
+### Build
+
+```bash
+pnpm --filter @remote-agent-server/web build
+pnpm --filter @remote-agent-server/web preview
+```
+
+### Browser Smoke Path
+
+With the control plane running and seeded with at least one host, workspace, and shared HTTP forward:
+
+1. Open the web app and sign in with the operator token.
+2. Confirm the dashboard lists hosts, workspaces, sessions, forwarded previews, and detected ports.
+3. Start or wait for a session so the live event panel receives `session.*` or `approval.*` events.
+4. Open a session review from the Sessions panel and page through its diff.
+5. Approve or reject a pending privileged action from the Approvals panel.
+6. Open a shared HTTP preview from the Forwarded previews panel.
 
 ## Remote Linux Runtime Install
 
@@ -212,6 +260,7 @@ Operators can manually register forwarded ports through `POST /api/ports`. A for
 
 - `GET /api/ports` returns active forwarded ports by default and supports `hostId`, `workspaceId`, and `sessionId` filters.
 - Add `includeInactive=true` to include closed or expired forwards in the response.
+- Add `includeDetected=true` to include detected-but-not-forwarded ports in the response for browser or other client inventory views.
 - `POST /api/ports/<port-id>/open` reopens a forward and can optionally update `expiresAt`.
 - `POST /api/ports/<port-id>/close` closes a forward without deleting it.
 - `POST /api/ports/<port-id>/expire` forces an immediate transition to `expired`.

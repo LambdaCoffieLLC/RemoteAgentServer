@@ -402,7 +402,13 @@ async function persistState(dataFile: string, state: ControlPlaneState) {
 }
 
 function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
-  response.writeHead(statusCode, { 'content-type': jsonContentType })
+  response.writeHead(statusCode, {
+    'content-type': jsonContentType,
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+    'access-control-allow-headers':
+      'authorization,content-type,last-event-id,x-bootstrap-token',
+  })
   response.end(JSON.stringify(body))
 }
 
@@ -412,6 +418,16 @@ function sendError(
   error: string,
 ) {
   sendJson(response, statusCode, { error })
+}
+
+function sendNoContent(response: ServerResponse) {
+  response.writeHead(204, {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+    'access-control-allow-headers':
+      'authorization,content-type,last-event-id,x-bootstrap-token',
+  })
+  response.end()
 }
 
 async function readJsonBody<T>(request: IncomingMessage) {
@@ -2088,6 +2104,7 @@ export async function startControlPlaneServer(
           'cache-control': 'no-cache, no-transform',
           connection: 'keep-alive',
           'content-type': eventStreamContentType,
+          'access-control-allow-origin': '*',
         })
 
         clients.add(response)
@@ -2169,6 +2186,11 @@ export async function startControlPlaneServer(
           managedPortMatch[1],
           managedPortMatch[2],
         )
+        return
+      }
+
+      if (request.method === 'OPTIONS') {
+        sendNoContent(response)
         return
       }
 
@@ -2405,12 +2427,16 @@ export async function startControlPlaneServer(
 
         const includeInactive =
           url.searchParams.get('includeInactive') === 'true'
+        const includeDetected =
+          url.searchParams.get('includeDetected') === 'true'
         const workspaceId = url.searchParams.get('workspaceId') ?? undefined
         const sessionId = url.searchParams.get('sessionId') ?? undefined
         const hostId = url.searchParams.get('hostId') ?? undefined
         const ports = state.forwardedPorts
           .map((record) => getForwardedPortSnapshot(record))
-          .filter((record) => record.state === 'forwarded')
+          .filter((record) =>
+            includeDetected ? true : record.state === 'forwarded',
+          )
           .filter((record) => (hostId ? record.hostId === hostId : true))
           .filter((record) =>
             workspaceId ? record.workspaceId === workspaceId : true,
@@ -2419,7 +2445,9 @@ export async function startControlPlaneServer(
             sessionId ? record.sessionId === sessionId : true,
           )
           .filter((record) =>
-            includeInactive ? true : record.forwardingState === 'open',
+            includeInactive
+              ? true
+              : record.state === 'detected' || record.forwardingState === 'open',
           )
 
         sendJson(response, 200, { data: ports })

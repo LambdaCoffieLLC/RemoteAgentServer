@@ -65,11 +65,19 @@ test('workspace packages extend the centralized TypeScript config and expose bui
 
     const packageJson = readJson<PackageJson>(packageJsonPath)
     const tsconfig = readText(tsconfigPath)
+    const expectedBuildScript =
+      workspacePath === 'apps/web'
+        ? 'tsc -p tsconfig.lib.json && tsc -p tsconfig.json --noEmit && vite build'
+        : 'tsc -p tsconfig.json'
+    const expectedTypecheckScript =
+      workspacePath === 'apps/web'
+        ? 'tsc -p tsconfig.json --noEmit'
+        : 'tsc -p tsconfig.json --noEmit'
 
     assert.match(packageJson.name ?? '', /^@remote-agent-server\//)
-    assert.equal(packageJson.scripts?.build, 'tsc -p tsconfig.json')
+    assert.equal(packageJson.scripts?.build, expectedBuildScript)
     assert.equal(packageJson.scripts?.lint, 'eslint src --ext .ts')
-    assert.equal(packageJson.scripts?.typecheck, 'tsc -p tsconfig.json --noEmit')
+    assert.equal(packageJson.scripts?.typecheck, expectedTypecheckScript)
     assert.match(tsconfig, /\.\.\/\.\.\/tsconfig\.package\.json/)
   }
 })
