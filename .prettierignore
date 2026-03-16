@@ -1,0 +1,4 @@
+node_modules
+dist
+.agents/ralph/logs
+.agents/ralph/verification

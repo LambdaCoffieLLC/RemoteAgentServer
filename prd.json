@@ -24,7 +24,9 @@
         "Root commands exist for install, build, lint, typecheck, and test across the full monorepo",
         "The root verification flow is documented and intended to be run locally and in CI"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented a pnpm workspace monorepo with TypeScript app and package scaffolds under apps/ and packages/, centralized root tsconfig/eslint/prettier config, documented root verification in README.md and .github/workflows/verify.yml, and added tests/monorepo.test.ts to verify the workspace contract. Verified with pnpm verify."
     },
     {
       "id": "US-002",

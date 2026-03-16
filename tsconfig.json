@@ -1,12 +1,7 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noEmit": true,
-    "types": ["node"],
-    "skipLibCheck": true
+    "noEmit": true
   },
-  "include": [".agents/ralph/**/*.ts"]
+  "include": [".agents/ralph/**/*.ts", "tests/**/*.ts"]
 }

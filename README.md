@@ -1,37 +1,66 @@
 # RemoteAgentServer
 
-RemoteAgentServer is reset to a Ralph-driven starting point. The repository keeps the product spec and the Ralph execution loop, but all generated app and package scaffolding has been removed so implementation can restart from story one.
+RemoteAgentServer now starts from a pnpm monorepo baseline so the control plane, runtimes, clients, and shared packages can evolve in one TypeScript-first workspace.
 
-## Commands
+## Quickstart
 
 ```bash
 pnpm install
+pnpm build
+pnpm lint
+pnpm typecheck
 pnpm test
-pnpm verify:ralph
-pnpm ralph
-pnpm ralph:danger
+pnpm verify
 ```
 
-## Layout
+`pnpm verify` is the root verification flow. It is intended to run both locally before commits and in CI on every push or pull request.
+
+## Workspace Layout
 
 ```text
 repo/
-├── prd.json
+├── apps/
+│   ├── desktop/
+│   ├── mobile/
+│   ├── server/
+│   └── web/
+├── packages/
+│   ├── runtime/
+│   └── shared/
+├── .agents/
+│   └── ralph/
+├── eslint.config.mjs
 ├── package.json
-├── tsconfig.json
-└── .agents/
-    └── ralph/
-        ├── CODEX.md
-        ├── README.md
-        ├── learnings.md
-        ├── ralph.ts
-        └── tests/
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+├── tsconfig.package.json
+└── prd.json
 ```
+
+## Monorepo Commands
+
+- `pnpm install` installs all workspace dependencies from the repo root.
+- `pnpm build` builds every first-party workspace package with TypeScript.
+- `pnpm lint` applies the centralized ESLint rules to the repo and all workspaces.
+- `pnpm typecheck` runs root and workspace TypeScript checks.
+- `pnpm test` runs repo-level monorepo contract tests and the existing Ralph runner tests.
+- `pnpm verify` runs the full local and CI verification flow in one command.
+- `pnpm verify:ralph` keeps Ralph pointed at the same root verification flow.
+- `pnpm ralph` and `pnpm ralph:danger` continue to run the local Ralph automation.
+
+## Centralized Tooling
+
+- `pnpm-workspace.yaml` defines all first-party workspace packages.
+- `tsconfig.base.json` and `tsconfig.package.json` provide shared TypeScript defaults for apps and packages.
+- `eslint.config.mjs` centralizes lint rules for repo tooling and workspace code.
+- `.prettierrc.json` centralizes formatting rules for the whole monorepo.
+
+## CI
+
+CI should execute `pnpm install --frozen-lockfile` followed by `pnpm verify`. A starter GitHub Actions workflow is included at `.github/workflows/verify.yml`.
 
 ## Notes
 
 - `prd.json` remains the canonical execution spec.
-- `.agents/ralph` contains the agent-specific runner, prompt rules, tests, and runtime logs.
-- `.agents/ralph/verification` stores per-story verification artifacts, including changed files and before/after automated-test counts for each attempt.
-- `pnpm ralph` defaults to Codex `workspace-write`; `pnpm ralph:danger` uses the Codex bypass flag with no sandbox or approval gates.
-- All user stories are reset to unfinished so Ralph can re-execute the entire PRD from the beginning.
+- `.agents/ralph` still contains the repo-local runner, prompt rules, and verification artifacts.
+- The current app and package code is intentionally minimal scaffold code for the monorepo story only.

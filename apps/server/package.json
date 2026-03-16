@@ -1,0 +1,17 @@
+{
+  "name": "@remote-agent-server/server",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "files": ["dist"],
+  "dependencies": {
+    "@remote-agent-server/runtime": "workspace:*",
+    "@remote-agent-server/shared": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
