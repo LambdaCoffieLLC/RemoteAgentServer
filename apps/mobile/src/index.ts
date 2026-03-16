@@ -12,7 +12,7 @@ import {
   type WorkspaceId,
 } from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
-import { createSessionSummary, type SessionEvent, type SessionStatus, type SessionSummary } from '@remote-agent/sessions'
+import { createSessionRecovery, createSessionSummary, type SessionEvent, type SessionRecovery, type SessionStatus, type SessionSummary } from '@remote-agent/sessions'
 import { createSurfaceSummary } from '@remote-agent/ui'
 
 const actor: AuthenticatedActor = {
@@ -112,6 +112,10 @@ export interface MobileControlPlaneClientOptions {
   previewOpeners?: MobilePreviewOpeners
 }
 
+export interface SessionRecoveryQuery {
+  limit?: number
+}
+
 /* eslint-disable no-unused-vars */
 export interface MobilePreviewOpeners {
   openInAppBrowser(url: string): Promise<unknown>
@@ -142,6 +146,7 @@ interface ControlPlaneSnapshotPayload {
 export interface MobileControlPlaneClient {
   signIn: () => Promise<MobileClientDashboard>
   listSessionEvents: (sessionId: SessionId) => Promise<SessionEvent[]>
+  recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
   decideApproval: (
     approvalId: MobileApprovalId,
     status: Extract<MobileApprovalStatus, 'approved' | 'rejected'>,
@@ -266,6 +271,14 @@ export function createMobileControlPlaneClient(options: MobileControlPlaneClient
     listSessionEvents: async (sessionIdToRead) => {
       const response = await request<SessionEvent[]>(`/v1/sessions/${sessionIdToRead}/events`)
       return response.data.map((event) => ({ ...event }))
+    },
+    recoverSession: async (sessionIdToRead, query = {}) => {
+      const response = await request<SessionRecovery>(
+        withQuery(`/v1/sessions/${sessionIdToRead}/recovery`, {
+          limit: query.limit,
+        }),
+      )
+      return createSessionRecovery(response.data)
     },
     decideApproval: async (approvalId, status) => {
       const response = await request<MobileClientApprovalRecord>(`/v1/approvals/${approvalId}`, {

@@ -232,7 +232,9 @@
         "Recovered sessions include recent logs and messages",
         "Temporary disconnects do not destroy active session state"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended packages/sessions/src/index.ts and apps/server/src/index.ts so session summaries now normalize updatedAt/lastActivityAt/endedAt metadata, the control plane exposes GET /v1/sessions/:id/recovery for resumable session recovery with recent event history, and session activity timestamps stay current as logs, outputs, status changes, and rejection logs are appended. Added recovery helpers to apps/web/src/index.ts, apps/mobile/src/index.ts, and apps/desktop/src/index.ts so web, mobile, and desktop clients can reopen an existing session from another device. Added .agents/ralph/tests/us-017-persist-session-history.test.ts coverage for cross-device recovery, recent log/output replay, persisted metadata after restart, and temporary disconnect recovery, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-018",

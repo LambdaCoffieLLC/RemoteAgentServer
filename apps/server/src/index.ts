@@ -22,6 +22,7 @@ import {
 import { coreProviderDescriptors } from '@remote-agent/providers'
 import {
   createSessionEvent,
+  createSessionRecovery,
   createSessionSummary,
   type SessionChangeList,
   type SessionChangeSummary,
@@ -34,6 +35,7 @@ import {
   type SessionLogLevel,
   type SessionOutputStream,
   type SessionPatchSummary,
+  type SessionRecovery,
   type SessionStatus,
   type SessionSummary,
   type SessionWorkspaceMetadata,
@@ -207,6 +209,10 @@ interface ListSessionChangesInput {
 
 interface ReadSessionDiffInput extends ListSessionChangesInput {
   maxBytes?: number
+}
+
+interface RecoverSessionInput {
+  limit?: number
 }
 
 interface EnrollRuntimeInput {
@@ -535,6 +541,19 @@ export class ControlPlaneServer {
     return this.state.sessionEvents.filter((event) => event.sessionId === sessionId).sort((left, right) => left.sequence - right.sequence)
   }
 
+  async recoverSession(sessionId: SessionId, input: RecoverSessionInput = {}): Promise<SessionRecovery> {
+    const session = this.getSession(sessionId)
+    const allEvents = await this.listSessionEvents(sessionId)
+    const limit = input.limit ?? 20
+    const recentEvents = allEvents.slice(-limit)
+
+    return createSessionRecovery({
+      session,
+      recentEvents,
+      recoveredAt: this.clock(),
+    })
+  }
+
   async listSessionChanges(sessionId: SessionId, input: ListSessionChangesInput = {}): Promise<SessionChangeList> {
     const changedFiles = await this.readSessionChangedFiles(sessionId)
     const filteredFiles = filterChangedFiles(changedFiles, input.path)
@@ -614,6 +633,7 @@ export class ControlPlaneServer {
       clock: this.clock,
     })
 
+    const startedAt = input.startedAt ?? this.clock()
     const session = createSessionSummary({
       id: input.id,
       hostId: input.hostId,
@@ -621,12 +641,14 @@ export class ControlPlaneServer {
       provider: input.provider,
       requestedBy: input.requestedBy ?? pickActorIdentity(actor),
       status: input.status ?? 'running',
-      startedAt: input.startedAt ?? this.clock(),
+      startedAt,
+      updatedAt: startedAt,
+      lastActivityAt: startedAt,
       workspace: sessionWorkspace,
     })
 
     this.state.sessions = upsertRecord(this.state.sessions, session)
-    const sessionEvent = this.buildStatusSessionEvent(session.id, session.status, undefined, session.provider)
+    const sessionEvent = this.buildStatusSessionEvent(session.id, session.status, undefined, session.provider, startedAt)
     this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
     await this.persistState()
     this.publishEvent('session.upserted', { session })
@@ -643,13 +665,17 @@ export class ControlPlaneServer {
     }
 
     assertSessionStatusTransition(current.status, input.status)
+    const timestamp = this.clock()
     const updated = createSessionSummary({
       ...current,
       status: input.status,
+      updatedAt: timestamp,
+      lastActivityAt: timestamp,
+      endedAt: isTerminalSessionStatus(input.status) ? timestamp : undefined,
     })
 
     this.state.sessions = upsertRecord(this.state.sessions, updated)
-    const sessionEvent = this.buildStatusSessionEvent(updated.id, updated.status, current.status)
+    const sessionEvent = this.buildStatusSessionEvent(updated.id, updated.status, current.status, undefined, timestamp)
     this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
     await this.persistState()
     this.publishEvent('session.updated', { session: updated })
@@ -665,15 +691,22 @@ export class ControlPlaneServer {
   }
 
   async createSessionEvent(sessionId: SessionId, input: CreateSessionEventInput) {
-    this.getSession(sessionId)
+    const current = this.getSession(sessionId)
 
     if (input.message.trim().length === 0) {
       throw new ControlPlaneRequestError(400, 'invalid_session_event', 'Session events require a non-empty message.')
     }
 
     const sessionEvent = this.buildSessionEvent(sessionId, input)
+    const updatedSession = createSessionSummary({
+      ...current,
+      updatedAt: sessionEvent.createdAt,
+      lastActivityAt: sessionEvent.createdAt,
+    })
+    this.state.sessions = upsertRecord(this.state.sessions, updatedSession)
     this.state.sessionEvents = [...this.state.sessionEvents, sessionEvent]
     await this.persistState()
+    this.publishEvent('session.updated', { session: updatedSession })
     this.publishEvent('session.event.created', { sessionEvent })
     return sessionEvent
   }
@@ -755,6 +788,7 @@ export class ControlPlaneServer {
     ]
 
     let rejectionSessionEvent: SessionEvent | undefined
+    let updatedSession: SessionSummary | undefined
 
     if (input.status === 'rejected') {
       rejectionSessionEvent = this.buildSessionEvent(updated.sessionId, {
@@ -762,11 +796,21 @@ export class ControlPlaneServer {
         level: 'warn',
         message: `Privileged action rejected: ${updated.action}.`,
       })
+      updatedSession = createSessionSummary({
+        ...this.getSession(updated.sessionId),
+        updatedAt: rejectionSessionEvent.createdAt,
+        lastActivityAt: rejectionSessionEvent.createdAt,
+      })
+      this.state.sessions = upsertRecord(this.state.sessions, updatedSession)
       this.state.sessionEvents = [...this.state.sessionEvents, rejectionSessionEvent]
     }
 
     await this.persistState()
     this.publishEvent('approval.decided', { approval: updated })
+
+    if (updatedSession) {
+      this.publishEvent('session.updated', { session: updatedSession })
+    }
 
     if (rejectionSessionEvent) {
       this.publishEvent('session.event.created', { sessionEvent: rejectionSessionEvent })
@@ -1092,6 +1136,23 @@ export class ControlPlaneServer {
         }
 
         this.writeJson(response, 200, { data: await this.inspectSession(pathSegments[2] as SessionId) })
+        return
+      }
+
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'sessions' &&
+        pathSegments[2] &&
+        pathSegments[3] === 'recovery' &&
+        !pathSegments[4]
+      ) {
+        if (!this.authorizeRequest(request, response, 'sessions:read')) {
+          return
+        }
+
+        const limit = parsePaginationInteger(url.searchParams.get('limit'), 'limit')
+        this.writeJson(response, 200, { data: await this.recoverSession(pathSegments[2] as SessionId, { limit }) })
         return
       }
 
@@ -1648,6 +1709,7 @@ export class ControlPlaneServer {
     status: SessionStatus,
     previousStatus?: SessionStatus,
     provider?: SessionSummary['provider'],
+    createdAt?: IsoTimestamp,
   ) {
     const nextSequence = this.nextSessionEventSequence(sessionId)
     return createSessionEvent({
@@ -1655,7 +1717,7 @@ export class ControlPlaneServer {
       sessionId,
       sequence: nextSequence,
       kind: 'status',
-      createdAt: this.clock(),
+      createdAt: createdAt ?? this.clock(),
       message: describeSessionStatusMessage(status, previousStatus, provider),
       status,
     })
@@ -1900,6 +1962,10 @@ function assertSessionStatusTransition(currentStatus: SessionStatus, nextStatus:
       `Session ${currentStatus} cannot transition to ${nextStatus}.`,
     )
   }
+}
+
+function isTerminalSessionStatus(status: SessionStatus) {
+  return ['completed', 'failed', 'canceled'].includes(status)
 }
 
 function describeSessionStatusMessage(

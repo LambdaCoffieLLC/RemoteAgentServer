@@ -3,10 +3,12 @@ import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
 import { createManifest, type HostId, type IsoTimestamp, type ProtocolEnvelope, type SessionId, type WorkspaceId } from '@remote-agent/protocol'
 import { coreProviderDescriptors } from '@remote-agent/providers'
 import {
+  createSessionRecovery,
   createSessionSummary,
   type SessionChangeList,
   type SessionDiff,
   type SessionEvent,
+  type SessionRecovery,
   type SessionSummary,
 } from '@remote-agent/sessions'
 import { createSurfaceSummary } from '@remote-agent/ui'
@@ -106,6 +108,10 @@ export interface SessionDiffQuery extends SessionChangeQuery {
   maxBytes?: number
 }
 
+export interface SessionRecoveryQuery {
+  limit?: number
+}
+
 interface JsonSuccessResponse<TData> {
   data: TData
 }
@@ -136,6 +142,7 @@ type WebHeadersInit = globalThis.HeadersInit
 export interface WebControlPlaneClient {
   signIn: () => Promise<WebClientDashboard>
   listSessionEvents: (sessionId: SessionId) => Promise<SessionEvent[]>
+  recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
   listSessionChanges: (sessionId: SessionId, query?: SessionChangeQuery) => Promise<SessionChangeList>
   readSessionDiff: (sessionId: SessionId, query?: SessionDiffQuery) => Promise<SessionDiff>
   decideApproval: (
@@ -232,7 +239,7 @@ export function createWebControlPlaneClient(options: WebControlPlaneClientOption
       return {
         hosts: hosts.data,
         workspaces: workspaces.data,
-        sessions: sessions.data,
+        sessions: sessions.data.map((session) => createSessionSummary(session)),
         approvals: approvals.data,
         ports: ports.data,
       }
@@ -240,6 +247,14 @@ export function createWebControlPlaneClient(options: WebControlPlaneClientOption
     listSessionEvents: async (sessionId) => {
       const response = await request<SessionEvent[]>(`/v1/sessions/${sessionId}/events`)
       return response.data
+    },
+    recoverSession: async (sessionId, query = {}) => {
+      const response = await request<SessionRecovery>(
+        withQuery(`/v1/sessions/${sessionId}/recovery`, {
+          limit: query.limit,
+        }),
+      )
+      return createSessionRecovery(response.data)
     },
     listSessionChanges: async (sessionId, query = {}) => {
       const response = await request<SessionChangeList>(

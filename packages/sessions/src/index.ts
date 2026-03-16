@@ -35,6 +35,9 @@ export interface SessionSummary {
   requestedBy: Pick<AuthenticatedActor, 'id' | 'displayName'>
   status: SessionStatus
   startedAt: IsoTimestamp
+  updatedAt?: IsoTimestamp
+  lastActivityAt?: IsoTimestamp
+  endedAt?: IsoTimestamp
   workspace?: SessionWorkspaceMetadata
 }
 
@@ -48,6 +51,12 @@ export interface SessionEvent {
   status?: SessionStatus
   level?: SessionLogLevel
   stream?: SessionOutputStream
+}
+
+export interface SessionRecovery {
+  session: SessionSummary
+  recentEvents: SessionEvent[]
+  recoveredAt: IsoTimestamp
 }
 
 export interface SessionChangedFile {
@@ -105,9 +114,16 @@ export interface SessionDiff {
 }
 
 export function createSessionSummary(summary: SessionSummary): SessionSummary {
+  const updatedAt = summary.updatedAt ?? summary.startedAt
+  const lastActivityAt = summary.lastActivityAt ?? updatedAt
+  const endedAt = summary.endedAt ?? (isTerminalStatus(summary.status) ? updatedAt : undefined)
+
   return {
     ...summary,
     requestedBy: { ...summary.requestedBy },
+    updatedAt,
+    lastActivityAt,
+    endedAt,
     workspace: summary.workspace
       ? {
           ...summary.workspace,
@@ -125,4 +141,16 @@ export function createSessionEvent(event: SessionEvent): SessionEvent {
   return {
     ...event,
   }
+}
+
+export function createSessionRecovery(recovery: SessionRecovery): SessionRecovery {
+  return {
+    session: createSessionSummary(recovery.session),
+    recentEvents: recovery.recentEvents.map((event) => createSessionEvent(event)),
+    recoveredAt: recovery.recoveredAt,
+  }
+}
+
+function isTerminalStatus(status: SessionStatus) {
+  return ['completed', 'failed', 'canceled'].includes(status)
 }
