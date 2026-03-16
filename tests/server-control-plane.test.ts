@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { promisify } from 'node:util'
 import { startControlPlaneServer, type ControlPlaneEvent } from '../apps/server/src/index.js'
+
+const execFileAsync = promisify(execFile)
 
 async function createTempDir() {
   return mkdtemp(join(tmpdir(), 'remote-agent-server-control-plane-'))
@@ -25,6 +29,13 @@ function bootstrapHeaders(token: string) {
 
 async function readJson(response: Response) {
   return (await response.json()) as { data?: unknown; error?: string }
+}
+
+async function createGitRepository(rootDir: string, repoName = 'repo') {
+  const repositoryPath = join(rootDir, repoName)
+  await mkdir(repositoryPath, { recursive: true })
+  await execFileAsync('git', ['init', '--initial-branch=main', repositoryPath])
+  return realpath(repositoryPath)
 }
 
 async function waitForEvent(
@@ -138,6 +149,7 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
   const tempDir = await createTempDir()
   const configFile = join(tempDir, 'control-plane.config.json')
   const dataFile = join(tempDir, 'control-plane-state.json')
+  const repositoryPath = await createGitRepository(tempDir, 'persisted-repo')
 
   await writeFile(
     configFile,
@@ -177,8 +189,7 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
         body: JSON.stringify({
           id: 'workspace-1',
           hostId: 'host-1',
-          path: '/srv/app',
-          defaultBranch: 'main',
+          path: repositoryPath,
           runtimeHostId: 'host-1',
         }),
       }),
@@ -280,6 +291,166 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
     }
   } finally {
     await restartedServer.close()
+  }
+})
+
+test('control plane registers git workspaces and supports list, inspect, and remove', async () => {
+  const tempDir = await createTempDir()
+  const repositoryPath = await createGitRepository(tempDir)
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile: join(tempDir, 'state.json'),
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+  })
+
+  try {
+    const hostRegistration = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostRegistration.status, 201)
+
+    const createWorkspace = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+      }),
+    })
+
+    assert.equal(createWorkspace.status, 201)
+    const createdWorkspace = (await readJson(createWorkspace)).data as {
+      id: string
+      hostId: string
+      path: string
+      defaultBranch: string
+      runtimeHostId: string
+    }
+    assert.equal(createdWorkspace.id, 'workspace-1')
+    assert.equal(createdWorkspace.hostId, 'host-1')
+    assert.equal(createdWorkspace.path, repositoryPath)
+    assert.equal(createdWorkspace.defaultBranch, 'main')
+    assert.equal(createdWorkspace.runtimeHostId, 'host-1')
+
+    const listedWorkspaces = await fetch(`${server.url}/api/workspaces`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(listedWorkspaces.status, 200)
+    assert.equal(((await readJson(listedWorkspaces)).data as unknown[]).length, 1)
+
+    const inspectedWorkspace = await fetch(`${server.url}/api/workspaces/workspace-1`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(inspectedWorkspace.status, 200)
+    assert.equal(
+      ((await readJson(inspectedWorkspace)).data as { id: string }).id,
+      'workspace-1',
+    )
+
+    const removedWorkspace = await fetch(`${server.url}/api/workspaces/workspace-1`, {
+      method: 'DELETE',
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(removedWorkspace.status, 200)
+    assert.equal(((await readJson(removedWorkspace)).data as { id: string }).id, 'workspace-1')
+
+    const emptyWorkspaces = await fetch(`${server.url}/api/workspaces`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(emptyWorkspaces.status, 200)
+    assert.deepEqual((await readJson(emptyWorkspaces)).data, [])
+  } finally {
+    await server.close()
+  }
+})
+
+test('control plane rejects workspaces for missing hosts and inaccessible git paths', async () => {
+  const tempDir = await createTempDir()
+  const missingRepositoryPath = join(tempDir, 'missing-repo')
+  const nonRepositoryPath = join(tempDir, 'not-a-repo')
+  await mkdir(nonRepositoryPath, { recursive: true })
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile: join(tempDir, 'state.json'),
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+  })
+
+  try {
+    const hostRegistration = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostRegistration.status, 201)
+
+    const missingHost = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-missing-host',
+        hostId: 'host-404',
+        path: missingRepositoryPath,
+      }),
+    })
+    assert.equal(missingHost.status, 400)
+    assert.equal((await readJson(missingHost)).error, '"hostId" must reference a registered host.')
+
+    const missingRepository = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-missing-repo',
+        hostId: 'host-1',
+        path: missingRepositoryPath,
+      }),
+    })
+    assert.equal(missingRepository.status, 400)
+    assert.equal(
+      (await readJson(missingRepository)).error,
+      `Repository path "${missingRepositoryPath}" does not exist or is not accessible.`,
+    )
+
+    const invalidRepository = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-not-git',
+        hostId: 'host-1',
+        path: nonRepositoryPath,
+      }),
+    })
+    assert.equal(invalidRepository.status, 400)
+    assert.equal(
+      (await readJson(invalidRepository)).error,
+      `Repository path "${nonRepositoryPath}" is not an accessible git repository.`,
+    )
+  } finally {
+    await server.close()
   }
 })
 

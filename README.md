@@ -24,7 +24,7 @@ pnpm verify
 The server app at `apps/server` is now a runnable control plane for the single-user self-hosted MVP. It exposes protected JSON APIs for:
 
 - hosts at `/api/hosts`
-- workspaces at `/api/workspaces`
+- workspaces at `/api/workspaces` and `/api/workspaces/:id`
 - sessions at `/api/sessions`
 - approvals at `/api/approvals`
 - notifications at `/api/notifications`
@@ -145,11 +145,24 @@ Example config file:
 
 Core metadata for hosts, workspaces, sessions, approvals, notifications, and forwarded ports is persisted to the configured JSON file and reloaded on restart.
 
+### Workspace Registration
+
+Managed workspaces are registered through `POST /api/workspaces`. The control plane requires:
+
+- `hostId`: an existing registered host
+- `path`: a repository path the control plane can access on disk
+- `runtimeHostId`: optional, defaults to `hostId`
+- `defaultBranch`: optional, auto-detected from the git repository when omitted
+
+Workspace registration fails with a clear `400` error when the host is unknown, the path is inaccessible, or the target path is not a git repository. Operators can list workspaces with `GET /api/workspaces`, inspect one with `GET /api/workspaces/<workspace-id>`, and remove one with `DELETE /api/workspaces/<workspace-id>`.
+
 ### Manual Smoke Test
 
-Start the server, then register a host with the bootstrap token and inspect it with the operator token:
+Start the server, then register a host with the bootstrap token, register the current checkout as a workspace, inspect it, and remove it with the operator token:
 
 ```bash
+REPO_PATH=$(pwd)
+
 curl -sS \
   -H 'x-bootstrap-token: bootstrap-dev-token' \
   -H 'content-type: application/json' \
@@ -159,6 +172,24 @@ curl -sS \
 curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/hosts
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d "{\"id\":\"workspace-1\",\"hostId\":\"host-1\",\"path\":\"${REPO_PATH}\"}" \
+  http://127.0.0.1:4318/api/workspaces
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/workspaces
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/workspaces/workspace-1
+
+curl -sS -X DELETE \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/workspaces/workspace-1
 
 curl -N \
   -H 'Authorization: Bearer operator-dev-token' \

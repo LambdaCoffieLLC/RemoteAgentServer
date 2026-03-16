@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { createTokenCredential, type AuthHeaderName, type AuthPolicy, type AuthScheme } from '@remote-agent-server/auth'
 import { createManagedPort, type ManagedPort, type PortProtocol, type PortState, type PortVisibility } from '@remote-agent-server/ports'
 import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
@@ -15,6 +17,7 @@ const defaultBindPort = 4318
 const defaultDataFile = '.remote-agent-server/control-plane.json'
 const jsonContentType = 'application/json; charset=utf-8'
 const eventStreamContentType = 'text/event-stream; charset=utf-8'
+const execFileAsync = promisify(execFile)
 
 export interface HostRecord {
   id: string
@@ -390,18 +393,82 @@ function requireHostRecord(body: unknown): HostRecord {
   }
 }
 
-function requireWorkspaceRecord(body: unknown): WorkspaceRecord {
+async function resolveGitRepository(path: string) {
+  try {
+    await access(path)
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      throw new Error(`Repository path "${path}" does not exist or is not accessible.`)
+    }
+
+    throw new Error(`Repository path "${path}" is not accessible.`)
+  }
+
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', path, 'rev-parse', '--show-toplevel'])
+    return stdout.trim()
+  } catch {
+    throw new Error(`Repository path "${path}" is not an accessible git repository.`)
+  }
+}
+
+async function detectDefaultBranch(path: string) {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', path, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+    const remoteBranch = stdout.trim()
+
+    if (remoteBranch.length > 0) {
+      return remoteBranch.replace(/^origin\//, '')
+    }
+  } catch {
+    // Fall through to the local HEAD branch lookup.
+  }
+
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', path, 'symbolic-ref', '--quiet', '--short', 'HEAD'])
+    const branch = stdout.trim()
+
+    if (branch.length > 0) {
+      return branch
+    }
+  } catch {
+    // Surface a clearer error below.
+  }
+
+  throw new Error(`Repository path "${path}" does not expose a default branch. Provide "defaultBranch" explicitly.`)
+}
+
+function requireRegisteredHost(state: ControlPlaneState, hostId: string, fieldName: string) {
+  if (!state.hosts.some((host) => host.id === hostId)) {
+    throw new Error(`"${fieldName}" must reference a registered host.`)
+  }
+}
+
+async function requireWorkspaceRecord(body: unknown, state: ControlPlaneState): Promise<WorkspaceRecord> {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
   }
 
+  const hostId = requireString(record.hostId, 'hostId')
+  const runtimeHostId = requireString(record.runtimeHostId ?? record.hostId, 'runtimeHostId')
+  requireRegisteredHost(state, hostId, 'hostId')
+  requireRegisteredHost(state, runtimeHostId, 'runtimeHostId')
+
+  const repositoryPath = requireString(record.path, 'path')
+  const resolvedRepositoryPath = isAbsolute(repositoryPath) ? repositoryPath : resolve(repositoryPath)
+  const gitRepositoryPath = await resolveGitRepository(resolvedRepositoryPath)
+  const defaultBranch =
+    typeof record.defaultBranch === 'string' && record.defaultBranch.trim().length > 0
+      ? requireString(record.defaultBranch, 'defaultBranch')
+      : await detectDefaultBranch(gitRepositoryPath)
+
   return {
     id: requireString(record.id ?? `workspace-${randomUUID()}`, 'id'),
-    hostId: requireString(record.hostId, 'hostId'),
-    path: requireString(record.path, 'path'),
-    defaultBranch: requireString(record.defaultBranch ?? 'main', 'defaultBranch'),
-    runtimeHostId: requireString(record.runtimeHostId ?? record.hostId, 'runtimeHostId'),
+    hostId,
+    path: gitRepositoryPath,
+    defaultBranch,
+    runtimeHostId,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
   }
 }
@@ -509,6 +576,16 @@ function upsertRecord<TRecord extends { id: string }>(collection: TRecord[], rec
   }
 }
 
+function removeRecordById<TRecord extends { id: string }>(collection: TRecord[], id: string) {
+  const index = collection.findIndex((item) => item.id === id)
+  if (index === -1) {
+    return undefined
+  }
+
+  const [record] = collection.splice(index, 1)
+  return record
+}
+
 function notFound(response: ServerResponse) {
   sendError(response, 404, 'Not found.')
 }
@@ -551,6 +628,30 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     }
 
     sendJson(response, statusCode, { data: record })
+  }
+
+  async function remove<TRecord extends { id: string }>(
+    response: ServerResponse,
+    collectionName: keyof ControlPlaneState,
+    id: string,
+    eventType: string,
+  ) {
+    const collection = state[collectionName] as unknown as TRecord[]
+    const removedRecord = removeRecordById(collection, id)
+
+    if (!removedRecord) {
+      notFound(response)
+      return
+    }
+
+    await persistCurrentState()
+
+    const event = createEvent(eventType, removedRecord)
+    for (const client of clients) {
+      writeSseEvent(client, event)
+    }
+
+    sendJson(response, 200, { data: removedRecord })
   }
 
   const server = createServer(async (request, response) => {
@@ -635,8 +736,25 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'POST' && pathname === '/api/workspaces') {
-        const workspace = requireWorkspaceRecord(await readJsonBody(request))
+        const workspace = await requireWorkspaceRecord(await readJsonBody(request), state)
         await commit(response, workspace, 'workspaces', 'workspace.upserted')
+        return
+      }
+
+      const workspaceMatch = pathname.match(/^\/api\/workspaces\/([^/]+)$/)
+      if (request.method === 'GET' && workspaceMatch) {
+        const workspace = state.workspaces.find((entry) => entry.id === workspaceMatch[1])
+        if (!workspace) {
+          notFound(response)
+          return
+        }
+
+        sendJson(response, 200, { data: workspace })
+        return
+      }
+
+      if (request.method === 'DELETE' && workspaceMatch) {
+        await remove<WorkspaceRecord>(response, 'workspaces', workspaceMatch[1], 'workspace.removed')
         return
       }
 

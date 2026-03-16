@@ -100,7 +100,9 @@
         "Users can list, inspect, and remove registered workspaces",
         "Workspace registration validates that the target path is an accessible git repository"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Implemented repository-backed workspace registration in apps/server so POST /api/workspaces now requires a registered host, validates the target path with git, auto-detects the default branch when omitted, and persists hostId, path, defaultBranch, and runtimeHostId metadata. Added workspace inspect and removal endpoints at GET /api/workspaces/:id and DELETE /api/workspaces/:id, documented the workflow and manual smoke commands in README.md, and added integration coverage in tests/server-control-plane.test.ts for successful registration plus list/inspect/remove behavior and clear rejection of unknown hosts, missing paths, and non-git directories. Verified with pnpm lint, pnpm build, pnpm typecheck, and pnpm test."
     },
     {
       "id": "US-007",
