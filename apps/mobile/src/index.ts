@@ -37,6 +37,7 @@ export interface MobileClientHostRecord {
   id: HostId
   label: string
   platform: MobileHostPlatform
+  connectionMode: 'local' | 'remote'
   runtimeStatus: MobileHostRuntimeStatus
   enrolledAt: IsoTimestamp
   lastSeenAt: IsoTimestamp
@@ -48,13 +49,14 @@ export interface MobileClientHostRecord {
     connectivity: RuntimeConnectivityStatus
     enrolledAt: IsoTimestamp
     reportedAt: IsoTimestamp
-    enrollmentMethod: 'bootstrap-token'
+    enrollmentMethod: 'bootstrap-token' | 'local-registration' | 'development-attach'
   }
 }
 
 export interface MobileClientWorkspaceRecord {
   id: WorkspaceId
   hostId: HostId
+  hostConnectionMode: 'local' | 'remote'
   name: string
   path: string
   repositoryPath: string
@@ -434,7 +436,7 @@ export function buildMobileBrowseItems(dashboard: MobileClientDashboard, target:
     return dashboard.hosts.map((host) => ({
       id: host.id,
       title: host.label,
-      subtitle: `${host.platform} host`,
+      subtitle: `${host.connectionMode === 'local' ? 'Local' : 'Remote'} ${host.platform} host`,
       detail: host.runtime ? `${host.runtime.version} • ${host.runtime.health}` : host.runtimeStatus,
       badge: host.runtimeStatus,
     }))

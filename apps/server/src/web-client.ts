@@ -693,7 +693,10 @@ const WEB_CLIENT_SCRIPT = `
           host.id,
           host.runtimeStatus,
           host.runtime ? 'Runtime ' + host.runtime.label + ' · ' + host.runtime.version : 'No enrolled runtime.',
-          ['Platform ' + host.platform, 'Last seen ' + formatTime(host.lastSeenAt)],
+          [
+            (host.connectionMode === 'local' ? 'Local ' : 'Remote ') + host.platform + ' host',
+            'Last seen ' + formatTime(host.lastSeenAt),
+          ],
         )).join('')
       }
 
@@ -708,7 +711,10 @@ const WEB_CLIENT_SCRIPT = `
           workspace.id,
           workspace.defaultBranch,
           workspace.path,
-          ['Host ' + workspace.hostId, workspace.runtimeLabel],
+          [
+            (workspace.hostConnectionMode === 'local' ? 'Local' : 'Remote') + ' host ' + workspace.hostId,
+            workspace.runtimeLabel,
+          ],
         )).join('')
       }
 

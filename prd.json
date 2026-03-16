@@ -68,7 +68,9 @@
         "Providers do not require separate local-only implementations",
         "Clients clearly distinguish local and remote hosts"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Extended apps/runtime/src/index.ts with local-mode helpers so a local runtime can either attach directly in development mode through the existing RuntimeSessionManager/provider adapter contract or register with the control plane through the existing host/workspace APIs. Updated apps/server/src/index.ts to persist host connectionMode and workspace hostConnectionMode plus local runtime metadata on normal host registrations, and updated the served/browser/mobile client models so local and remote hosts are labeled distinctly. Added .agents/ralph/tests/us-005-local-mode.test.ts coverage for direct local attachment, local control-plane registration, same session APIs on registered local workspaces, shared provider adapter usage, and client-visible local/remote host distinction, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-006",

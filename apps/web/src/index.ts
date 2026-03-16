@@ -29,6 +29,7 @@ export interface WebClientHostRecord {
   id: HostId
   label: string
   platform: 'linux' | 'macos' | 'windows'
+  connectionMode: 'local' | 'remote'
   runtimeStatus: 'online' | 'offline' | 'degraded'
   enrolledAt: IsoTimestamp
   lastSeenAt: IsoTimestamp
@@ -40,13 +41,14 @@ export interface WebClientHostRecord {
     connectivity: 'connected' | 'disconnected'
     enrolledAt: IsoTimestamp
     reportedAt: IsoTimestamp
-    enrollmentMethod: 'bootstrap-token'
+    enrollmentMethod: 'bootstrap-token' | 'local-registration' | 'development-attach'
   }
 }
 
 export interface WebClientWorkspaceRecord {
   id: WorkspaceId
   hostId: HostId
+  hostConnectionMode: 'local' | 'remote'
   name: string
   path: string
   repositoryPath: string
@@ -1356,6 +1358,7 @@ const WEB_CLIENT_SCRIPT = `
         refs.hosts.innerHTML = state.dashboard.hosts
           .map((host) => {
             const statusTone = host.runtimeStatus === 'online' ? 'good' : host.runtimeStatus === 'degraded' ? 'warn' : 'bad'
+            const topologyLabel = (host.connectionMode === 'local' ? 'Local ' : 'Remote ') + host.platform + ' host'
             const runtime = host.runtime
               ? '<p>Runtime ' + escapeHtml(host.runtime.label) + ' · ' + escapeHtml(host.runtime.version) + '</p>'
               : '<p>No enrolled runtime.</p>'
@@ -1366,7 +1369,7 @@ const WEB_CLIENT_SCRIPT = `
                 '<span class="badge ' + statusTone + '">' + escapeHtml(host.runtimeStatus) + '</span>' +
               '</div>' +
               runtime +
-              '<div class="meta-line"><span>' + escapeHtml(host.platform) + '</span><span>Last seen ' + escapeHtml(formatTimestamp(host.lastSeenAt)) + '</span></div>' +
+              '<div class="meta-line"><span>' + escapeHtml(topologyLabel) + '</span><span>Last seen ' + escapeHtml(formatTimestamp(host.lastSeenAt)) + '</span></div>' +
             '</article>'
           })
           .join('')
@@ -1380,13 +1383,14 @@ const WEB_CLIENT_SCRIPT = `
 
         refs.workspaces.innerHTML = state.dashboard.workspaces
           .map((workspace) => {
+            const workspaceHostLabel = (workspace.hostConnectionMode === 'local' ? 'Local' : 'Remote') + ' host ' + workspace.hostId
             return '<article class="record">' +
               '<div class="record-header">' +
                 '<div><h3>' + escapeHtml(workspace.name) + '</h3><p>' + escapeHtml(workspace.id) + '</p></div>' +
                 '<span class="badge">' + escapeHtml(workspace.defaultBranch) + '</span>' +
               '</div>' +
               '<p>' + escapeHtml(workspace.path) + '</p>' +
-              '<div class="meta-line"><span>Host ' + escapeHtml(workspace.hostId) + '</span><span>' + escapeHtml(workspace.runtimeLabel) + '</span></div>' +
+              '<div class="meta-line"><span>' + escapeHtml(workspaceHostLabel) + '</span><span>' + escapeHtml(workspace.runtimeLabel) + '</span></div>' +
             '</article>'
           })
           .join('')

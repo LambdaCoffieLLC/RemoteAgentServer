@@ -1,8 +1,9 @@
-import { spawn as spawnChildProcess } from 'node:child_process'
+import { execFile as execFileCallback, spawn as spawnChildProcess } from 'node:child_process'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { hostname as getHostname } from 'node:os'
-import { join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import type { Readable } from 'node:stream'
+import { promisify } from 'node:util'
 import { createForwardedPort } from '@remote-agent/ports'
 import {
   createManifest,
@@ -49,6 +50,7 @@ const workspaceId = 'workspace_runtime' as WorkspaceId
 const sessionId = 'session_runtime_probe' as SessionId
 const runtimeVersion = '0.1.0-dev'
 const runtimeServiceName = 'remote-agent-runtime'
+const execFile = promisify(execFileCallback)
 
 export interface InstalledLinuxRuntimeConfig {
   configVersion: 1
@@ -90,6 +92,7 @@ export interface RuntimeControlPlaneHost {
   id: HostId
   label: string
   platform: 'linux' | 'macos' | 'windows'
+  connectionMode: 'local' | 'remote'
   runtimeStatus: 'online' | 'offline' | 'degraded'
   enrolledAt: IsoTimestamp
   lastSeenAt: IsoTimestamp
@@ -101,7 +104,23 @@ export interface RuntimeControlPlaneHost {
     connectivity: RuntimeConnectivityStatus
     reportedAt: IsoTimestamp
     enrolledAt: IsoTimestamp
-    enrollmentMethod: 'bootstrap-token'
+    enrollmentMethod: 'bootstrap-token' | 'local-registration' | 'development-attach'
+  }
+}
+
+export interface RuntimeControlPlaneWorkspace {
+  id: WorkspaceId
+  hostId: HostId
+  hostConnectionMode: 'local' | 'remote'
+  name: string
+  path: string
+  repositoryPath: string
+  defaultBranch: string
+  runtimeLabel: string
+  runtimeAssociation: {
+    hostId: HostId
+    runtimeId?: RuntimeId
+    label: string
   }
 }
 
@@ -123,6 +142,55 @@ export interface RuntimeStatusReportOptions {
 export interface RuntimeControlPlaneResponse {
   statusCode: number
   host: RuntimeControlPlaneHost
+}
+
+export interface LocalRuntimeOptions {
+  repositoryPath: string
+  hostId?: HostId
+  hostLabel?: string
+  workspaceId?: WorkspaceId
+  workspaceName?: string
+  runtimeId?: RuntimeId
+  runtimeLabel?: string
+  version?: string
+  defaultBranch?: string
+  platform?: RuntimeControlPlaneHost['platform']
+  hostname?: string
+  health?: RuntimeHealthStatus
+  connectivity?: RuntimeConnectivityStatus
+  clock?: () => IsoTimestamp
+}
+
+export interface AttachLocalRuntimeOptions extends LocalRuntimeOptions {
+  sessionManager?: RuntimeSessionManager
+  sessionManagerOptions?: RuntimeSessionManagerOptions
+}
+
+export interface RegisterLocalRuntimeOptions extends LocalRuntimeOptions {
+  serverOrigin: string
+  token: string
+  fetchImpl?: typeof fetch
+}
+
+export interface LocalRuntimeAttachment {
+  mode: 'development-attach'
+  host: RuntimeControlPlaneHost
+  workspace: RuntimeControlPlaneWorkspace
+  sessionManager: RuntimeSessionManager
+  startSession: (
+    // eslint-disable-next-line no-unused-vars
+    options: Omit<StartRuntimeSessionOptions, 'hostId' | 'workspaceId' | 'workspacePath'>,
+  ) => Promise<RuntimeManagedSession>
+}
+
+export interface LocalRuntimeRegistrationResult {
+  mode: 'server-registration'
+  host: RuntimeControlPlaneHost
+  workspace: RuntimeControlPlaneWorkspace
+  responses: {
+    hostStatusCode: number
+    workspaceStatusCode: number
+  }
 }
 
 export interface CoreProviderCommandTemplate {
@@ -561,6 +629,83 @@ export async function reportInstalledRuntimeStatus(options: RuntimeStatusReportO
   )
 }
 
+export async function attachLocalRuntime(options: AttachLocalRuntimeOptions): Promise<LocalRuntimeAttachment> {
+  const descriptor = await createLocalRuntimeDescriptor(options, 'development-attach')
+  const sessionManager = options.sessionManager ?? new RuntimeSessionManager(options.sessionManagerOptions)
+
+  return {
+    mode: 'development-attach',
+    host: descriptor.host,
+    workspace: descriptor.workspace,
+    sessionManager,
+    startSession: async (sessionOptions) => {
+      const session = await sessionManager.startSession({
+        ...sessionOptions,
+        hostId: descriptor.host.id,
+        workspaceId: descriptor.workspace.id,
+        workspacePath: descriptor.workspace.path,
+      })
+
+      return {
+        ...session,
+        session: createSessionSummary({
+          ...session.session,
+          workspace: {
+            mode: 'direct',
+            repositoryPath: descriptor.workspace.repositoryPath,
+            path: descriptor.workspace.path,
+            allowDirtyWorkspace: false,
+          },
+        }),
+      }
+    },
+  }
+}
+
+export async function registerLocalRuntime(options: RegisterLocalRuntimeOptions): Promise<LocalRuntimeRegistrationResult> {
+  const descriptor = await createLocalRuntimeDescriptor(options, 'local-registration')
+  const fetchImplementation = options.fetchImpl ?? fetch
+
+  const hostResponse = await postAuthorizedControlPlaneRequest<RuntimeControlPlaneHost>(
+    options.serverOrigin,
+    '/v1/hosts',
+    options.token,
+    {
+      id: descriptor.host.id,
+      label: descriptor.host.label,
+      platform: descriptor.host.platform,
+      connectionMode: descriptor.host.connectionMode,
+      runtimeStatus: descriptor.host.runtimeStatus,
+      runtime: descriptor.host.runtime,
+    },
+    fetchImplementation,
+  )
+  const workspaceResponse = await postAuthorizedControlPlaneRequest<RuntimeControlPlaneWorkspace>(
+    options.serverOrigin,
+    '/v1/workspaces',
+    options.token,
+    {
+      id: descriptor.workspace.id,
+      hostId: descriptor.workspace.hostId,
+      name: descriptor.workspace.name,
+      repositoryPath: descriptor.workspace.repositoryPath,
+      defaultBranch: descriptor.workspace.defaultBranch,
+      runtimeLabel: descriptor.workspace.runtimeLabel,
+    },
+    fetchImplementation,
+  )
+
+  return {
+    mode: 'server-registration',
+    host: hostResponse.data,
+    workspace: workspaceResponse.data,
+    responses: {
+      hostStatusCode: hostResponse.statusCode,
+      workspaceStatusCode: workspaceResponse.statusCode,
+    },
+  }
+}
+
 export function renderLinuxInstallScript(options: Pick<LinuxRuntimeInstallOptions, 'installRoot' | 'serverOrigin' | 'bootstrapToken'>) {
   const installRoot = options.installRoot
   const serverOrigin = normalizeOrigin(options.serverOrigin)
@@ -713,6 +858,62 @@ function normalizeApprovalDecision(decision: RuntimeApprovalHandlerDecision) {
   }
 }
 
+async function createLocalRuntimeDescriptor(
+  options: LocalRuntimeOptions,
+  enrollmentMethod: NonNullable<RuntimeControlPlaneHost['runtime']>['enrollmentMethod'],
+) {
+  const clock = options.clock ?? (() => new Date().toISOString())
+  const repository = await resolveLocalRepository(options.repositoryPath, options.defaultBranch)
+  const machineName = options.hostname ?? getHostname()
+  const hostLabel = options.hostLabel ?? `Local ${machineName}`
+  const runtimeLabel = options.runtimeLabel ?? `${hostLabel} Runtime`
+  const hostId = options.hostId ?? toHostId(`local-${machineName}`)
+  const runtimeId = options.runtimeId ?? toRuntimeId(`local-${machineName}`)
+  const workspaceId = options.workspaceId ?? toWorkspaceId(basename(repository.path))
+  const timestamp = clock()
+  const health = options.health ?? 'healthy'
+  const connectivity = options.connectivity ?? 'connected'
+  const runtimeStatus: RuntimeControlPlaneHost['runtimeStatus'] =
+    connectivity === 'disconnected' ? 'offline' : health === 'healthy' ? 'online' : 'degraded'
+
+  return {
+    host: {
+      id: hostId,
+      label: hostLabel,
+      platform: options.platform ?? detectLocalPlatform(),
+      connectionMode: 'local' as const,
+      runtimeStatus,
+      enrolledAt: timestamp,
+      lastSeenAt: timestamp,
+      runtime: {
+        runtimeId,
+        label: runtimeLabel,
+        version: options.version ?? runtimeVersion,
+        health,
+        connectivity,
+        reportedAt: timestamp,
+        enrolledAt: timestamp,
+        enrollmentMethod,
+      },
+    },
+    workspace: {
+      id: workspaceId,
+      hostId,
+      hostConnectionMode: 'local' as const,
+      name: options.workspaceName ?? basename(repository.path),
+      path: repository.path,
+      repositoryPath: repository.path,
+      defaultBranch: repository.defaultBranch,
+      runtimeLabel,
+      runtimeAssociation: {
+        hostId,
+        runtimeId,
+        label: runtimeLabel,
+      },
+    },
+  }
+}
+
 function createRuntimeStatus(id: RuntimeId, version: string): RuntimeStatusSnapshot {
   return {
     runtimeId: id,
@@ -727,6 +928,18 @@ function normalizeOrigin(origin: string) {
   return origin.replace(/\/+$/, '')
 }
 
+function detectLocalPlatform(): RuntimeControlPlaneHost['platform'] {
+  if (process.platform === 'darwin') {
+    return 'macos'
+  }
+
+  if (process.platform === 'win32') {
+    return 'windows'
+  }
+
+  return 'linux'
+}
+
 function toHostId(hostname: string) {
   return `host_${toSlug(hostname)}` as HostId
 }
@@ -735,12 +948,16 @@ function toRuntimeId(hostname: string) {
   return `runtime_${toSlug(hostname)}` as RuntimeId
 }
 
-function toSlug(value: string) {
+function toWorkspaceId(name: string) {
+  return `workspace_${toSlug(name, 'workspace')}` as WorkspaceId
+}
+
+function toSlug(value: string, fallback = 'linux-host') {
   return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'linux-host'
+    .replace(/^-+|-+$/g, '') || fallback
 }
 
 async function readInstalledRuntimeConfig(configPath: string) {
@@ -848,6 +1065,56 @@ WantedBy=multi-user.target
 `
 }
 
+async function resolveLocalRepository(repositoryPath: string, defaultBranch?: string) {
+  const normalizedPath = resolve(repositoryPath)
+
+  let repositoryRoot = normalizedPath
+
+  try {
+    const result = await execFile('git', ['-C', normalizedPath, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+    })
+    repositoryRoot = result.stdout.trim()
+  } catch {
+    throw new Error(`Repository path ${normalizedPath} is not a git repository.`)
+  }
+
+  const detectedDefaultBranch = defaultBranch ?? (await detectLocalDefaultBranch(repositoryRoot))
+
+  return {
+    path: repositoryRoot,
+    defaultBranch: detectedDefaultBranch,
+  }
+}
+
+async function detectLocalDefaultBranch(repositoryPath: string) {
+  const originHead = await tryReadLocalGitOutput(repositoryPath, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+
+  if (originHead) {
+    return originHead.replace(/^origin\//, '')
+  }
+
+  const currentHead = await tryReadLocalGitOutput(repositoryPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+
+  if (currentHead) {
+    return currentHead
+  }
+
+  throw new Error(`Repository path ${repositoryPath} is missing a detectable default branch.`)
+}
+
+async function tryReadLocalGitOutput(repositoryPath: string, args: string[]) {
+  try {
+    const result = await execFile('git', ['-C', repositoryPath, ...args], {
+      encoding: 'utf8',
+    })
+    const output = result.stdout.trim()
+    return output.length > 0 ? output : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function postControlPlaneRequest(
   serverOrigin: string,
   path: string,
@@ -873,5 +1140,33 @@ async function postControlPlaneRequest(
   return {
     statusCode: response.status,
     host: payload.data,
+  }
+}
+
+async function postAuthorizedControlPlaneRequest<TData>(
+  serverOrigin: string,
+  path: string,
+  token: string,
+  body: Record<string, unknown>,
+  fetchImpl = fetch,
+) {
+  const response = await fetchImpl(`${normalizeOrigin(serverOrigin)}${path}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const payloadText = await response.text()
+  const payload = payloadText.length > 0 ? (JSON.parse(payloadText) as { data?: TData; error?: { message?: string } }) : {}
+
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.error?.message ?? `Runtime control-plane request failed with status ${response.status}.`)
+  }
+
+  return {
+    statusCode: response.status,
+    data: payload.data,
   }
 }

@@ -51,6 +51,7 @@ const execFile = promisify(execFileCallback)
 
 export type HostPlatform = 'linux' | 'macos' | 'windows'
 export type HostRuntimeStatus = 'online' | 'offline' | 'degraded'
+export type HostConnectionMode = 'local' | 'remote'
 export type ApprovalId = `approval_${string}`
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type AuditLogId = `audit_${string}`
@@ -62,13 +63,14 @@ export type NotificationCategory = 'approval-required' | 'session-status' | 'por
 export interface HostRuntimeRecord extends RuntimeStatusSnapshot {
   label: string
   enrolledAt: IsoTimestamp
-  enrollmentMethod: 'bootstrap-token'
+  enrollmentMethod: 'bootstrap-token' | 'local-registration' | 'development-attach'
 }
 
 export interface HostRecord {
   id: HostId
   label: string
   platform: HostPlatform
+  connectionMode: HostConnectionMode
   runtimeStatus: HostRuntimeStatus
   enrolledAt: IsoTimestamp
   lastSeenAt: IsoTimestamp
@@ -78,6 +80,7 @@ export interface HostRecord {
 export interface WorkspaceRecord {
   id: WorkspaceId
   hostId: HostId
+  hostConnectionMode: HostConnectionMode
   name: string
   path: string
   repositoryPath: string
@@ -160,9 +163,20 @@ interface CreateHostInput {
   id: HostId
   label: string
   platform: HostPlatform
+  connectionMode?: HostConnectionMode
   runtimeStatus: HostRuntimeStatus
   enrolledAt?: IsoTimestamp
   lastSeenAt?: IsoTimestamp
+  runtime?: {
+    runtimeId: RuntimeId
+    label?: string
+    version: string
+    health: RuntimeHealthStatus
+    connectivity: RuntimeConnectivityStatus
+    enrolledAt?: IsoTimestamp
+    reportedAt?: IsoTimestamp
+    enrollmentMethod?: HostRuntimeRecord['enrollmentMethod']
+  }
 }
 
 interface CreateWorkspaceInput {
@@ -411,14 +425,29 @@ export class ControlPlaneServer {
   async upsertHost(input: CreateHostInput) {
     const timestamp = this.clock()
     const current = this.state.hosts.find((host) => host.id === input.id)
+    const connectionMode = input.connectionMode ?? current?.connectionMode ?? 'remote'
     const host: HostRecord = {
       id: input.id,
       label: input.label,
       platform: input.platform,
+      connectionMode,
       runtimeStatus: input.runtimeStatus,
       enrolledAt: input.enrolledAt ?? current?.enrolledAt ?? timestamp,
       lastSeenAt: input.lastSeenAt ?? timestamp,
-      runtime: current?.runtime ? { ...current.runtime } : undefined,
+      runtime: input.runtime
+        ? {
+            runtimeId: input.runtime.runtimeId,
+            label: input.runtime.label ?? current?.runtime?.label ?? `${input.label} Runtime`,
+            version: input.runtime.version,
+            health: input.runtime.health,
+            connectivity: input.runtime.connectivity,
+            enrolledAt: input.runtime.enrolledAt ?? current?.runtime?.enrolledAt ?? timestamp,
+            reportedAt: input.runtime.reportedAt ?? timestamp,
+            enrollmentMethod: input.runtime.enrollmentMethod ?? current?.runtime?.enrollmentMethod ?? 'local-registration',
+          }
+        : current?.runtime
+          ? { ...current.runtime }
+          : undefined,
     }
 
     this.state.hosts = upsertRecord(this.state.hosts, host)
@@ -445,6 +474,7 @@ export class ControlPlaneServer {
       id: input.hostId,
       label: input.label,
       platform: input.platform,
+      connectionMode: 'remote',
       runtimeStatus: deriveRuntimeStatus(runtime),
       enrolledAt: currentHost?.enrolledAt ?? timestamp,
       lastSeenAt: timestamp,
@@ -502,6 +532,7 @@ export class ControlPlaneServer {
     const workspace: WorkspaceRecord = {
       id: input.id,
       hostId: host.id,
+      hostConnectionMode: host.connectionMode,
       name: input.name?.trim() || basename(repository.path),
       path: repository.path,
       repositoryPath: repository.path,
@@ -1067,6 +1098,41 @@ export class ControlPlaneServer {
         if (!input.id || !input.label || !input.platform || !input.runtimeStatus) {
           this.writeError(response, 400, 'invalid_host', 'Host registration requires id, label, platform, and runtimeStatus.')
           return
+        }
+
+        if (input.connectionMode && !['local', 'remote'].includes(input.connectionMode)) {
+          this.writeError(response, 400, 'invalid_host', 'Host connectionMode must be local or remote when provided.')
+          return
+        }
+
+        if (input.runtime) {
+          if (
+            !input.runtime.runtimeId ||
+            !input.runtime.version ||
+            !input.runtime.health ||
+            !input.runtime.connectivity
+          ) {
+            this.writeError(
+              response,
+              400,
+              'invalid_host',
+              'Host runtime registration requires runtimeId, version, health, and connectivity when runtime is provided.',
+            )
+            return
+          }
+
+          if (
+            input.runtime.enrollmentMethod &&
+            !['bootstrap-token', 'local-registration', 'development-attach'].includes(input.runtime.enrollmentMethod)
+          ) {
+            this.writeError(
+              response,
+              400,
+              'invalid_host',
+              'Host runtime enrollmentMethod must be bootstrap-token, local-registration, or development-attach.',
+            )
+            return
+          }
         }
 
         this.writeJson(response, 201, { data: await this.upsertHost(input as CreateHostInput) })
@@ -1852,7 +1918,7 @@ class ControlPlaneRequestError extends Error {
 
 function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
   return {
-    hosts: [...(seedState?.hosts ?? emptyState.hosts)],
+    hosts: (seedState?.hosts ?? emptyState.hosts).map((host) => normalizeHostRecord(host)),
     workspaces: (seedState?.workspaces ?? emptyState.workspaces).map((workspace) => normalizeWorkspaceRecord(workspace)),
     sessions: (seedState?.sessions ?? emptyState.sessions).map((session) => createSessionSummary(session)),
     sessionEvents: (seedState?.sessionEvents ?? emptyState.sessionEvents).map((event) => createSessionEvent(event)),
@@ -1868,14 +1934,7 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
 
 function cloneState(state: ControlPlaneState): ControlPlaneState {
   return {
-    hosts: state.hosts.map((host) => ({
-      ...host,
-      runtime: host.runtime
-        ? {
-            ...host.runtime,
-          }
-        : undefined,
-    })),
+    hosts: state.hosts.map((host) => normalizeHostRecord(host)),
     workspaces: state.workspaces.map((workspace) => normalizeWorkspaceRecord(workspace)),
     sessions: state.sessions.map((session) => createSessionSummary(session)),
     sessionEvents: state.sessionEvents.map((event) => createSessionEvent(event)),
@@ -2014,6 +2073,7 @@ function normalizeWorkspaceRecord(workspace: WorkspaceRecord) {
 
   return {
     ...workspace,
+    hostConnectionMode: workspace.hostConnectionMode ?? 'remote',
     path,
     repositoryPath: workspace.repositoryPath ?? path,
     runtimeLabel,
@@ -2022,6 +2082,18 @@ function normalizeWorkspaceRecord(workspace: WorkspaceRecord) {
       runtimeId: undefined,
       label: runtimeLabel,
     },
+  }
+}
+
+function normalizeHostRecord(host: HostRecord) {
+  return {
+    ...host,
+    connectionMode: host.connectionMode ?? 'remote',
+    runtime: host.runtime
+      ? {
+          ...host.runtime,
+        }
+      : undefined,
   }
 }
 
