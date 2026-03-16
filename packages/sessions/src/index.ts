@@ -7,6 +7,24 @@ export type SessionEventId = `session_event_${string}`
 export type SessionEventKind = 'status' | 'log' | 'output'
 export type SessionLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type SessionOutputStream = 'stdout' | 'stderr'
+export type SessionWorkspaceMode = 'direct' | 'worktree'
+
+export interface SessionWorktreeMetadata {
+  repositoryPath: string
+  path: string
+  branch: string
+  baseBranch: string
+  createdAt: IsoTimestamp
+  dirtyWorkspaceAllowed: boolean
+}
+
+export interface SessionWorkspaceMetadata {
+  mode: SessionWorkspaceMode
+  repositoryPath: string
+  path: string
+  allowDirtyWorkspace: boolean
+  worktree?: SessionWorktreeMetadata
+}
 
 export interface SessionSummary {
   id: SessionId
@@ -16,6 +34,7 @@ export interface SessionSummary {
   requestedBy: Pick<AuthenticatedActor, 'id' | 'displayName'>
   status: SessionStatus
   startedAt: IsoTimestamp
+  workspace?: SessionWorkspaceMetadata
 }
 
 export interface SessionEvent {
@@ -34,6 +53,16 @@ export function createSessionSummary(summary: SessionSummary): SessionSummary {
   return {
     ...summary,
     requestedBy: { ...summary.requestedBy },
+    workspace: summary.workspace
+      ? {
+          ...summary.workspace,
+          worktree: summary.workspace.worktree
+            ? {
+                ...summary.workspace.worktree,
+              }
+            : undefined,
+        }
+      : undefined,
   }
 }
 

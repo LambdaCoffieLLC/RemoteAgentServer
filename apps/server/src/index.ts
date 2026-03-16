@@ -29,6 +29,9 @@ import {
   type SessionOutputStream,
   type SessionStatus,
   type SessionSummary,
+  type SessionWorkspaceMetadata,
+  type SessionWorkspaceMode,
+  type SessionWorktreeMetadata,
 } from '@remote-agent/sessions'
 
 const hostId = 'host_control_plane' as HostId
@@ -150,6 +153,8 @@ interface CreateSessionInput {
   hostId: HostId
   workspaceId: WorkspaceId
   provider: SessionSummary['provider']
+  workspaceMode?: SessionWorkspaceMode
+  allowDirtyWorkspace?: boolean
   requestedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
   status?: SessionStatus
   startedAt?: IsoTimestamp
@@ -497,6 +502,14 @@ export class ControlPlaneServer {
       throw new ControlPlaneRequestError(400, 'invalid_provider', `Provider ${input.provider} is not supported.`)
     }
 
+    const sessionWorkspace = await prepareSessionWorkspace({
+      sessionId: input.id,
+      workspace,
+      workspaceMode: input.workspaceMode,
+      allowDirtyWorkspace: input.allowDirtyWorkspace,
+      clock: this.clock,
+    })
+
     const session = createSessionSummary({
       id: input.id,
       hostId: input.hostId,
@@ -505,6 +518,7 @@ export class ControlPlaneServer {
       requestedBy: input.requestedBy ?? pickActorIdentity(actor),
       status: input.status ?? 'running',
       startedAt: input.startedAt ?? this.clock(),
+      workspace: sessionWorkspace,
     })
 
     this.state.sessions = upsertRecord(this.state.sessions, session)
@@ -834,6 +848,16 @@ export class ControlPlaneServer {
 
         if (!input.id || !input.hostId || !input.workspaceId || !input.provider) {
           this.writeError(response, 400, 'invalid_session', 'Session creation requires id, hostId, workspaceId, and provider.')
+          return
+        }
+
+        if (input.workspaceMode && !['direct', 'worktree'].includes(input.workspaceMode)) {
+          this.writeError(response, 400, 'invalid_session', 'Session workspaceMode must be direct or worktree.')
+          return
+        }
+
+        if (input.allowDirtyWorkspace !== undefined && typeof input.allowDirtyWorkspace !== 'boolean') {
+          this.writeError(response, 400, 'invalid_session', 'Session allowDirtyWorkspace must be a boolean when provided.')
           return
         }
 
@@ -1464,6 +1488,47 @@ function normalizeWorkspaceRecord(workspace: WorkspaceRecord) {
   }
 }
 
+interface PrepareSessionWorkspaceOptions {
+  sessionId: SessionId
+  workspace: WorkspaceRecord
+  workspaceMode?: SessionWorkspaceMode
+  allowDirtyWorkspace?: boolean
+  clock: () => IsoTimestamp
+}
+
+async function prepareSessionWorkspace(options: PrepareSessionWorkspaceOptions): Promise<SessionWorkspaceMetadata> {
+  const workspaceMode = options.workspaceMode ?? 'direct'
+  const allowDirtyWorkspace = options.allowDirtyWorkspace ?? false
+
+  if (workspaceMode === 'direct') {
+    return {
+      mode: 'direct',
+      repositoryPath: options.workspace.repositoryPath,
+      path: options.workspace.path,
+      allowDirtyWorkspace,
+    }
+  }
+
+  if (!allowDirtyWorkspace) {
+    await assertRepositoryIsClean(options.workspace.repositoryPath, options.workspace.hostId)
+  }
+
+  const worktree = await createSessionWorktree({
+    sessionId: options.sessionId,
+    workspace: options.workspace,
+    allowDirtyWorkspace,
+    createdAt: options.clock(),
+  })
+
+  return {
+    mode: 'worktree',
+    repositoryPath: options.workspace.repositoryPath,
+    path: worktree.path,
+    allowDirtyWorkspace,
+    worktree,
+  }
+}
+
 async function resolveWorkspaceRepository(repositoryPath: string, hostId: HostId) {
   const normalizedPath = resolve(repositoryPath)
   await assertAccessibleWorkspacePath(normalizedPath, hostId)
@@ -1531,6 +1596,72 @@ async function detectDefaultBranch(repositoryPath: string, hostId: HostId) {
   )
 }
 
+async function assertRepositoryIsClean(repositoryPath: string, hostId: HostId) {
+  const status = await tryReadGitOutput(repositoryPath, ['status', '--porcelain', '--untracked-files=normal'])
+
+  if (status && status.trim().length > 0) {
+    throw new ControlPlaneRequestError(
+      409,
+      'dirty_workspace',
+      `Workspace ${repositoryPath} has uncommitted changes on host ${hostId}. Set allowDirtyWorkspace=true to continue.`,
+    )
+  }
+}
+
+interface CreateSessionWorktreeOptions {
+  sessionId: SessionId
+  workspace: WorkspaceRecord
+  allowDirtyWorkspace: boolean
+  createdAt: IsoTimestamp
+}
+
+async function createSessionWorktree(options: CreateSessionWorktreeOptions): Promise<SessionWorktreeMetadata> {
+  const branch = toSessionWorktreeBranchName(options.sessionId)
+  const worktreePath = resolve(
+    dirname(options.workspace.repositoryPath),
+    '.remote-agent-worktrees',
+    basename(options.workspace.repositoryPath),
+    toFilesystemSafeSegment(options.sessionId),
+  )
+
+  if (await gitRefExists(options.workspace.repositoryPath, `refs/heads/${branch}`)) {
+    throw new ControlPlaneRequestError(
+      409,
+      'session_worktree_conflict',
+      `Session worktree branch ${branch} already exists for ${options.sessionId}.`,
+    )
+  }
+
+  if (await pathExists(worktreePath)) {
+    throw new ControlPlaneRequestError(
+      409,
+      'session_worktree_conflict',
+      `Session worktree path ${worktreePath} already exists for ${options.sessionId}.`,
+    )
+  }
+
+  await mkdir(dirname(worktreePath), { recursive: true })
+
+  try {
+    await execFile('git', ['-C', options.workspace.repositoryPath, 'worktree', 'add', '-b', branch, worktreePath, options.workspace.defaultBranch])
+  } catch (error) {
+    throw new ControlPlaneRequestError(
+      500,
+      'session_worktree_failed',
+      `Failed to create a worktree for ${options.sessionId}: ${toErrorMessage(error)}`,
+    )
+  }
+
+  return {
+    repositoryPath: options.workspace.repositoryPath,
+    path: worktreePath,
+    branch,
+    baseBranch: options.workspace.defaultBranch,
+    createdAt: options.createdAt,
+    dirtyWorkspaceAllowed: options.allowDirtyWorkspace,
+  }
+}
+
 async function tryReadGitOutput(repositoryPath: string, args: string[]) {
   try {
     const result = await execFile('git', ['-C', repositoryPath, ...args])
@@ -1538,6 +1669,46 @@ async function tryReadGitOutput(repositoryPath: string, args: string[]) {
   } catch {
     return undefined
   }
+}
+
+async function gitRefExists(repositoryPath: string, ref: string) {
+  try {
+    await execFile('git', ['-C', repositoryPath, 'show-ref', '--verify', '--quiet', ref])
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function pathExists(path: string) {
+  try {
+    await stat(path)
+    return true
+  } catch (error) {
+    const missingPath = error instanceof Error && 'code' in error && error.code === 'ENOENT'
+
+    if (!missingPath) {
+      throw error
+    }
+
+    return false
+  }
+}
+
+function toSessionWorktreeBranchName(sessionId: SessionId) {
+  return `session/${toFilesystemSafeSegment(sessionId)}`
+}
+
+function toFilesystemSafeSegment(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, '-')
+}
+
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message
+  }
+
+  return 'Unknown git error.'
 }
 
 async function readJsonBody(request: IncomingMessage) {

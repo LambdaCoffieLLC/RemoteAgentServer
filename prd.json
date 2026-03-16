@@ -123,7 +123,9 @@
         "Dirty worktrees are rejected by default unless explicitly allowed",
         "Users can choose direct workspace mode for simple workflows"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended packages/sessions/src/index.ts with session workspace/worktree metadata and updated apps/server/src/index.ts so session creation now supports workspaceMode=direct|worktree, persists the selected workspace path on the session, creates dedicated git worktrees for worktree sessions, and rejects dirty source repositories by default unless allowDirtyWorkspace=true is explicitly set. Added .agents/ralph/tests/us-009-isolated-worktrees.test.ts coverage for direct workspace mode, dedicated worktree creation, dirty-workspace rejection, dirty override, and persisted worktree metadata, then verified with pnpm verify:ralph."
     },
     {
       "id": "US-010",
