@@ -166,7 +166,9 @@
         "HTTP services are exposed through a managed URL",
         "At least private and shared visibility modes are supported"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended packages/ports/src/index.ts with forwarded-port protocol/status metadata plus active/expired helpers, and updated apps/server/src/index.ts so forwarded ports can be created against registered hosts with private/shared visibility, filtered by workspace or session, opened/closed/expired through PATCH lifecycle actions, automatically expired when their TTL elapses, and exposed with managed URLs for HTTP/HTTPS services. Added .agents/ralph/tests/us-012-forward-remote-ports.test.ts coverage for manual TCP forwarding, workspace/session active-port listings, open-close-expire flows, managed HTTP URLs, visibility modes, and automatic expiration, then verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-013",

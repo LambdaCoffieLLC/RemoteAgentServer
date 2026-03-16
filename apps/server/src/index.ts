@@ -6,7 +6,7 @@ import { type AddressInfo } from 'node:net'
 import { basename, dirname, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createAuthorizationPolicy, type AuthScope, type AuthenticatedActor } from '@remote-agent/auth'
-import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
+import { createForwardedPort, hasForwardedPortExpired, isForwardedPortActive, type ForwardedPort } from '@remote-agent/ports'
 import {
   createManifest,
   type HostId,
@@ -247,8 +247,22 @@ interface CreateForwardedPortInput {
   sessionId?: SessionId
   localPort: number
   targetPort: number
+  protocol?: ForwardedPort['protocol']
   visibility: ForwardedPort['visibility']
   label: string
+  expiresAt?: IsoTimestamp
+}
+
+interface ListForwardedPortsInput {
+  hostId?: HostId
+  workspaceId?: WorkspaceId
+  sessionId?: SessionId
+  status?: ForwardedPort['status']
+  activeOnly?: boolean
+}
+
+interface UpdateForwardedPortInput {
+  action: 'open' | 'close' | 'expire'
 }
 
 const defaultActors: Record<string, AuthenticatedActor> = {
@@ -760,12 +774,12 @@ export class ControlPlaneServer {
     return updated
   }
 
-  async listPorts() {
-    return [...this.state.ports]
-  }
+  async listPorts(input: ListForwardedPortsInput = {}) {
+    await this.expireForwardedPorts()
 
-  async createForwardedPort(input: CreateForwardedPortInput) {
-    this.assertHostExists(input.hostId)
+    if (input.hostId) {
+      this.assertHostExists(input.hostId)
+    }
 
     if (input.workspaceId) {
       this.assertWorkspaceExists(input.workspaceId)
@@ -775,15 +789,85 @@ export class ControlPlaneServer {
       this.getSession(input.sessionId)
     }
 
+    return this.state.ports.filter((port) => {
+      if (input.hostId && port.hostId !== input.hostId) {
+        return false
+      }
+
+      if (input.workspaceId && port.workspaceId !== input.workspaceId) {
+        return false
+      }
+
+      if (input.sessionId && port.sessionId !== input.sessionId) {
+        return false
+      }
+
+      if (input.status && port.status !== input.status) {
+        return false
+      }
+
+      if (input.activeOnly && !isForwardedPortActive(port, this.clock())) {
+        return false
+      }
+
+      return true
+    })
+  }
+
+  async inspectForwardedPort(id: ForwardedPort['id']) {
+    await this.expireForwardedPorts()
+    return this.getForwardedPort(id)
+  }
+
+  async createForwardedPort(input: CreateForwardedPortInput) {
+    this.assertHostExists(input.hostId)
+    const workspace = input.workspaceId ? this.getWorkspace(input.workspaceId) : undefined
+    const session = input.sessionId ? this.getSession(input.sessionId) : undefined
+
+    if (workspace && workspace.hostId !== input.hostId) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_port_workspace',
+        `Workspace ${workspace.id} is registered on host ${workspace.hostId}, not ${input.hostId}.`,
+      )
+    }
+
+    if (session && session.hostId !== input.hostId) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_port_session',
+        `Session ${session.id} is registered on host ${session.hostId}, not ${input.hostId}.`,
+      )
+    }
+
+    if (workspace && session && session.workspaceId !== workspace.id) {
+      throw new ControlPlaneRequestError(
+        400,
+        'invalid_port_scope',
+        `Session ${session.id} does not belong to workspace ${workspace.id}.`,
+      )
+    }
+
+    if (!isValidPortNumber(input.localPort) || !isValidPortNumber(input.targetPort)) {
+      throw new ControlPlaneRequestError(400, 'invalid_port_number', 'Forwarded ports require localPort and targetPort between 1 and 65535.')
+    }
+
+    if (input.expiresAt && input.expiresAt <= this.clock()) {
+      throw new ControlPlaneRequestError(400, 'invalid_port_expiration', 'Forwarded ports must expire in the future when they are created.')
+    }
+
     const port = createForwardedPort({
       id: input.id,
       hostId: input.hostId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
+      workspaceId: workspace?.id,
+      sessionId: session?.id,
       localPort: input.localPort,
       targetPort: input.targetPort,
+      protocol: input.protocol ?? 'tcp',
       visibility: input.visibility,
       label: input.label,
+      expiresAt: input.expiresAt,
+      managedUrl: buildManagedPortUrl(input.id, input.protocol ?? 'tcp', input.visibility),
     })
 
     this.state.ports = upsertRecord(this.state.ports, port)
@@ -797,6 +881,48 @@ export class ControlPlaneServer {
       sessionId: port.sessionId,
       portId: port.id,
     })
+    return port
+  }
+
+  async updateForwardedPort(id: ForwardedPort['id'], input: UpdateForwardedPortInput) {
+    await this.expireForwardedPorts()
+
+    const current = this.getForwardedPort(id)
+    const now = this.clock()
+    const hasExpired = hasForwardedPortExpired(current, now)
+
+    let nextStatus = current.status
+
+    switch (input.action) {
+      case 'open':
+        if (current.status === 'expired' || hasExpired) {
+          throw new ControlPlaneRequestError(409, 'port_expired', `Forwarded port ${id} has expired and cannot be reopened.`)
+        }
+
+        nextStatus = 'open'
+        break
+      case 'close':
+        nextStatus = hasExpired ? 'expired' : 'closed'
+        break
+      case 'expire':
+        nextStatus = 'expired'
+        break
+      default:
+        throw new ControlPlaneRequestError(400, 'invalid_port_action', 'Port updates must set action to open, close, or expire.')
+    }
+
+    if (nextStatus === current.status) {
+      return current
+    }
+
+    const port = createForwardedPort({
+      ...current,
+      status: nextStatus,
+    })
+
+    this.state.ports = upsertRecord(this.state.ports, port)
+    await this.persistState()
+    this.publishEvent('port.updated', { port })
     return port
   }
 
@@ -1179,12 +1305,71 @@ export class ControlPlaneServer {
         return
       }
 
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        ['ports', 'forwarded-ports'].includes(pathSegments[1] ?? '') &&
+        pathSegments[2]
+      ) {
+        if (!this.authorizeRequest(request, response, 'ports:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.inspectForwardedPort(pathSegments[2] as ForwardedPort['id']) })
+        return
+      }
+
+      if (
+        request.method === 'PATCH' &&
+        pathSegments[0] === 'v1' &&
+        ['ports', 'forwarded-ports'].includes(pathSegments[1] ?? '') &&
+        pathSegments[2]
+      ) {
+        if (!this.authorizeRequest(request, response, 'ports:write')) {
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<UpdateForwardedPortInput>
+
+        if (!input.action || !['open', 'close', 'expire'].includes(input.action)) {
+          this.writeError(response, 400, 'invalid_port_action', 'Port updates must set action to open, close, or expire.')
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.updateForwardedPort(pathSegments[2] as ForwardedPort['id'], input as UpdateForwardedPortInput),
+        })
+        return
+      }
+
       if (request.method === 'GET' && (url.pathname === '/v1/ports' || url.pathname === '/v1/forwarded-ports')) {
         if (!this.authorizeRequest(request, response, 'ports:read')) {
           return
         }
 
-        this.writeJson(response, 200, { data: await this.listPorts() })
+        const activeOnlyRaw = url.searchParams.get('activeOnly')
+        const activeOnly = activeOnlyRaw === null ? false : parseBooleanQuery(activeOnlyRaw)
+        const status = url.searchParams.get('status')
+
+        if (activeOnlyRaw !== null && activeOnly === undefined) {
+          this.writeError(response, 400, 'invalid_port_filter', 'The activeOnly filter must be true or false.')
+          return
+        }
+
+        if (status && !['open', 'closed', 'expired'].includes(status)) {
+          this.writeError(response, 400, 'invalid_port_filter', 'The status filter must be open, closed, or expired.')
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.listPorts({
+            hostId: (url.searchParams.get('hostId') as HostId | null) ?? undefined,
+            workspaceId: (url.searchParams.get('workspaceId') as WorkspaceId | null) ?? undefined,
+            sessionId: (url.searchParams.get('sessionId') as SessionId | null) ?? undefined,
+            status: (status as ForwardedPort['status'] | null) ?? undefined,
+            activeOnly,
+          }),
+        })
         return
       }
 
@@ -1209,6 +1394,16 @@ export class ControlPlaneServer {
             'invalid_port',
             'Forwarded port creation requires id, hostId, localPort, targetPort, visibility, and label.',
           )
+          return
+        }
+
+        if (!['private', 'shared'].includes(input.visibility)) {
+          this.writeError(response, 400, 'invalid_port_visibility', 'Forwarded ports must use private or shared visibility.')
+          return
+        }
+
+        if (input.protocol && !['tcp', 'http', 'https'].includes(input.protocol)) {
+          this.writeError(response, 400, 'invalid_port_protocol', 'Forwarded ports must use tcp, http, or https protocols.')
           return
         }
 
@@ -1390,6 +1585,44 @@ export class ControlPlaneServer {
     return approval
   }
 
+  private getForwardedPort(id: ForwardedPort['id']) {
+    const port = this.state.ports.find((entry) => entry.id === id)
+
+    if (!port) {
+      throw new ControlPlaneRequestError(404, 'port_not_found', `Forwarded port ${id} is not registered.`)
+    }
+
+    return port
+  }
+
+  private async expireForwardedPorts() {
+    const now = this.clock()
+    const expiredPorts = this.state.ports
+      .filter((port) => port.status === 'open' && hasForwardedPortExpired(port, now))
+      .map((port) =>
+        createForwardedPort({
+          ...port,
+          status: 'expired',
+        }),
+      )
+
+    if (expiredPorts.length === 0) {
+      return
+    }
+
+    const expiredIds = new Set(expiredPorts.map((port) => port.id))
+    this.state.ports = [
+      ...this.state.ports.filter((port) => !expiredIds.has(port.id)),
+      ...expiredPorts,
+    ]
+
+    await this.persistState()
+
+    for (const port of expiredPorts) {
+      this.publishEvent('port.updated', { port })
+    }
+  }
+
   private buildSessionEvent(sessionId: SessionId, input: CreateSessionEventInput) {
     const nextSequence = this.nextSessionEventSequence(sessionId)
     return createSessionEvent({
@@ -1552,7 +1785,7 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
       ...entry,
       actor: { ...entry.actor },
     })),
-    ports: [...(seedState?.ports ?? emptyState.ports)],
+    ports: (seedState?.ports ?? emptyState.ports).map((port) => createForwardedPort(port)),
     notifications: [...(seedState?.notifications ?? emptyState.notifications)],
   }
 }
@@ -2008,6 +2241,31 @@ function parsePaginationInteger(value: string | null, field: 'cursor' | 'limit' 
 function normalizeSessionChangePathFilter(value: string | null) {
   const normalizedValue = value?.trim()
   return normalizedValue && normalizedValue.length > 0 ? normalizedValue : undefined
+}
+
+function parseBooleanQuery(value: string) {
+  if (value === 'true') {
+    return true
+  }
+
+  if (value === 'false') {
+    return false
+  }
+
+  return undefined
+}
+
+function isValidPortNumber(value: number) {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535
+}
+
+function buildManagedPortUrl(id: ForwardedPort['id'], protocol: ForwardedPort['protocol'], visibility: ForwardedPort['visibility']) {
+  if (protocol === 'tcp') {
+    return undefined
+  }
+
+  const scheme = protocol === 'https' ? 'https' : 'http'
+  return `${scheme}://${visibility}-${id}.ports.remote-agent.local`
 }
 
 interface PrepareSessionWorkspaceOptions {
