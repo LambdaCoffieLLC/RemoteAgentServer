@@ -17,6 +17,7 @@
     "@remote-agent/ports": "workspace:*",
     "@remote-agent/protocol": "workspace:*",
     "@remote-agent/providers": "workspace:*",
+    "@remote-agent/runtime": "workspace:*",
     "@remote-agent/sessions": "workspace:*",
     "@remote-agent/ui": "workspace:*"
   }

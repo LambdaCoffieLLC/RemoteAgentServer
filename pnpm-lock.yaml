@@ -50,6 +50,9 @@ importers:
       '@remote-agent/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@remote-agent/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@remote-agent/sessions':
         specifier: workspace:*
         version: link:../../packages/sessions

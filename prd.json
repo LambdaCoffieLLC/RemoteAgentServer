@@ -224,7 +224,9 @@
         "The desktop app reuses shared packages from the pnpm monorepo",
         "Users can switch between local and remote workspaces in one interface"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Expanded apps/desktop/src/index.ts from a recovery-only stub into a typed desktop control-plane client that signs in against the server, reads hosts/workspaces/sessions/approvals/ports, starts sessions, applies pause-resume-cancel actions, streams live SSE updates, and re-exports local-runtime helpers through the desktop surface. Added desktop workspace-switch targets that present registered remote workspaces, registered local workspaces, and direct development-attach local runtimes in one interface, and updated apps/desktop/package.json to reuse the monorepo runtime package. Added .agents/ralph/tests/us-016-provide-desktop-app.test.ts coverage for server-backed session management, direct local runtime session execution, shared workspace dependency wiring, and unified local/remote workspace switching, then verified with node --import tsx --test .agents/ralph/tests/us-016-provide-desktop-app.test.ts, pnpm --filter @remote-agent/desktop build, pnpm --filter @remote-agent/desktop lint, and pnpm --filter @remote-agent/desktop typecheck."
     },
     {
       "id": "US-017",
