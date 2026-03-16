@@ -1,7 +1,10 @@
+import { execFile as execFileCallback } from 'node:child_process'
+import { constants } from 'node:fs'
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer as createNodeServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { type AddressInfo } from 'node:net'
-import { dirname } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { createAuthorizationPolicy, type AuthScope, type AuthenticatedActor } from '@remote-agent/auth'
 import { createForwardedPort, type ForwardedPort } from '@remote-agent/ports'
 import {
@@ -22,6 +25,7 @@ import { createSessionSummary, type SessionStatus, type SessionSummary } from '@
 const hostId = 'host_control_plane' as HostId
 const workspaceId = 'workspace_server' as WorkspaceId
 const sessionId = 'session_server_bootstrap' as SessionId
+const execFile = promisify(execFileCallback)
 
 export type HostPlatform = 'linux' | 'macos' | 'windows'
 export type HostRuntimeStatus = 'online' | 'offline' | 'degraded'
@@ -50,9 +54,17 @@ export interface WorkspaceRecord {
   id: WorkspaceId
   hostId: HostId
   name: string
+  path: string
   repositoryPath: string
   defaultBranch: string
   runtimeLabel: string
+  runtimeAssociation: WorkspaceRuntimeAssociation
+}
+
+export interface WorkspaceRuntimeAssociation {
+  hostId: HostId
+  runtimeId?: RuntimeId
+  label: string
 }
 
 export interface ApprovalRecord {
@@ -117,10 +129,10 @@ interface CreateHostInput {
 interface CreateWorkspaceInput {
   id: WorkspaceId
   hostId: HostId
-  name: string
+  name?: string
   repositoryPath: string
-  defaultBranch: string
-  runtimeLabel: string
+  defaultBranch?: string
+  runtimeLabel?: string
 }
 
 interface CreateSessionInput {
@@ -396,21 +408,41 @@ export class ControlPlaneServer {
     return [...this.state.workspaces]
   }
 
+  async inspectWorkspace(id: WorkspaceId) {
+    return this.getWorkspace(id)
+  }
+
   async upsertWorkspace(input: CreateWorkspaceInput) {
-    this.assertHostExists(input.hostId)
+    const host = this.getHost(input.hostId)
+    const repository = await resolveWorkspaceRepository(input.repositoryPath, host.id)
+    const runtimeLabel = input.runtimeLabel ?? host.runtime?.label ?? `${host.label} Runtime`
 
     const workspace: WorkspaceRecord = {
       id: input.id,
-      hostId: input.hostId,
-      name: input.name,
-      repositoryPath: input.repositoryPath,
-      defaultBranch: input.defaultBranch,
-      runtimeLabel: input.runtimeLabel,
+      hostId: host.id,
+      name: input.name?.trim() || basename(repository.path),
+      path: repository.path,
+      repositoryPath: repository.path,
+      defaultBranch: input.defaultBranch ?? repository.defaultBranch,
+      runtimeLabel,
+      runtimeAssociation: {
+        hostId: host.id,
+        runtimeId: host.runtime?.runtimeId,
+        label: runtimeLabel,
+      },
     }
 
     this.state.workspaces = upsertRecord(this.state.workspaces, workspace)
     await this.persistState()
     this.publishEvent('workspace.registered', { workspace })
+    return workspace
+  }
+
+  async removeWorkspace(id: WorkspaceId) {
+    const workspace = this.getWorkspace(id)
+    this.state.workspaces = this.state.workspaces.filter((entry) => entry.id !== id)
+    await this.persistState()
+    this.publishEvent('workspace.removed', { workspace })
     return workspace
   }
 
@@ -635,6 +667,15 @@ export class ControlPlaneServer {
         return
       }
 
+      if (request.method === 'GET' && pathSegments[0] === 'v1' && pathSegments[1] === 'workspaces' && pathSegments[2]) {
+        if (!this.authorizeRequest(request, response, 'workspaces:read')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.inspectWorkspace(pathSegments[2] as WorkspaceId) })
+        return
+      }
+
       if (request.method === 'GET' && url.pathname === '/v1/workspaces') {
         if (!this.authorizeRequest(request, response, 'workspaces:read')) {
           return
@@ -651,17 +692,26 @@ export class ControlPlaneServer {
 
         const input = (await readJsonBody(request)) as Partial<CreateWorkspaceInput>
 
-        if (!input.id || !input.hostId || !input.name || !input.repositoryPath || !input.defaultBranch || !input.runtimeLabel) {
+        if (!input.id || !input.hostId || !input.repositoryPath) {
           this.writeError(
             response,
             400,
             'invalid_workspace',
-            'Workspace registration requires id, hostId, name, repositoryPath, defaultBranch, and runtimeLabel.',
+            'Workspace registration requires id, hostId, and repositoryPath.',
           )
           return
         }
 
         this.writeJson(response, 201, { data: await this.upsertWorkspace(input as CreateWorkspaceInput) })
+        return
+      }
+
+      if (request.method === 'DELETE' && pathSegments[0] === 'v1' && pathSegments[1] === 'workspaces' && pathSegments[2]) {
+        if (!this.authorizeRequest(request, response, 'workspaces:write')) {
+          return
+        }
+
+        this.writeJson(response, 200, { data: await this.removeWorkspace(pathSegments[2] as WorkspaceId) })
         return
       }
 
@@ -933,9 +983,17 @@ export class ControlPlaneServer {
   }
 
   private assertWorkspaceExists(id: WorkspaceId) {
-    if (!this.state.workspaces.some((workspace) => workspace.id === id)) {
+    this.getWorkspace(id)
+  }
+
+  private getWorkspace(id: WorkspaceId) {
+    const workspace = this.state.workspaces.find((entry) => entry.id === id)
+
+    if (!workspace) {
       throw new ControlPlaneRequestError(404, 'workspace_not_found', `Workspace ${id} is not registered.`)
     }
+
+    return workspace
   }
 
   private getSession(id: SessionId) {
@@ -1053,7 +1111,7 @@ class ControlPlaneRequestError extends Error {
 function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
   return {
     hosts: [...(seedState?.hosts ?? emptyState.hosts)],
-    workspaces: [...(seedState?.workspaces ?? emptyState.workspaces)],
+    workspaces: (seedState?.workspaces ?? emptyState.workspaces).map((workspace) => normalizeWorkspaceRecord(workspace)),
     sessions: [...(seedState?.sessions ?? emptyState.sessions)],
     approvals: [...(seedState?.approvals ?? emptyState.approvals)],
     ports: [...(seedState?.ports ?? emptyState.ports)],
@@ -1071,7 +1129,7 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
           }
         : undefined,
     })),
-    workspaces: state.workspaces.map((workspace) => ({ ...workspace })),
+    workspaces: state.workspaces.map((workspace) => normalizeWorkspaceRecord(workspace)),
     sessions: state.sessions.map((session) => createSessionSummary(session)),
     approvals: state.approvals.map((approval) => ({
       ...approval,
@@ -1109,6 +1167,99 @@ function deriveRuntimeStatus(runtime: Pick<HostRuntimeRecord, 'connectivity' | '
   }
 
   return runtime.health === 'healthy' ? 'online' : 'degraded'
+}
+
+function normalizeWorkspaceRecord(workspace: WorkspaceRecord) {
+  const path = workspace.path ?? workspace.repositoryPath
+  const runtimeLabel = workspace.runtimeLabel ?? workspace.runtimeAssociation?.label ?? 'Unspecified Runtime'
+
+  return {
+    ...workspace,
+    path,
+    repositoryPath: workspace.repositoryPath ?? path,
+    runtimeLabel,
+    runtimeAssociation: workspace.runtimeAssociation ?? {
+      hostId: workspace.hostId,
+      runtimeId: undefined,
+      label: runtimeLabel,
+    },
+  }
+}
+
+async function resolveWorkspaceRepository(repositoryPath: string, hostId: HostId) {
+  const normalizedPath = resolve(repositoryPath)
+  await assertAccessibleWorkspacePath(normalizedPath, hostId)
+
+  let repositoryRoot: string
+
+  try {
+    const result = await execFile('git', ['-C', normalizedPath, 'rev-parse', '--show-toplevel'])
+    repositoryRoot = result.stdout.trim()
+  } catch {
+    throw new ControlPlaneRequestError(
+      400,
+      'invalid_workspace_path',
+      `Repository path ${normalizedPath} is not a git repository on host ${hostId}.`,
+    )
+  }
+
+  const defaultBranch = await detectDefaultBranch(repositoryRoot, hostId)
+
+  return {
+    path: repositoryRoot,
+    defaultBranch,
+  }
+}
+
+async function assertAccessibleWorkspacePath(repositoryPath: string, hostId: HostId) {
+  try {
+    await access(repositoryPath, constants.R_OK | constants.X_OK)
+  } catch {
+    throw new ControlPlaneRequestError(
+      400,
+      'invalid_workspace_path',
+      `Repository path ${repositoryPath} is not accessible on host ${hostId}.`,
+    )
+  }
+
+  const repositoryStats = await stat(repositoryPath)
+
+  if (!repositoryStats.isDirectory()) {
+    throw new ControlPlaneRequestError(
+      400,
+      'invalid_workspace_path',
+      `Repository path ${repositoryPath} is not a directory on host ${hostId}.`,
+    )
+  }
+}
+
+async function detectDefaultBranch(repositoryPath: string, hostId: HostId) {
+  const originHeadBranch = await tryReadGitOutput(repositoryPath, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+
+  if (originHeadBranch) {
+    return originHeadBranch.replace(/^origin\//, '')
+  }
+
+  const currentBranch = await tryReadGitOutput(repositoryPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+
+  if (currentBranch) {
+    return currentBranch
+  }
+
+  throw new ControlPlaneRequestError(
+    400,
+    'invalid_workspace_path',
+    `Repository path ${repositoryPath} is missing a detectable default branch on host ${hostId}.`,
+  )
+}
+
+async function tryReadGitOutput(repositoryPath: string, args: string[]) {
+  try {
+    const result = await execFile('git', ['-C', repositoryPath, ...args])
+    return result.stdout.trim()
+  } catch {
+    return undefined
+  }
 }
 
 async function readJsonBody(request: IncomingMessage) {

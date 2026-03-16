@@ -51,7 +51,7 @@ test('US-003 runs a persisted control plane with protected APIs and real-time ev
       id: 'workspace_app',
       hostId: 'host_primary',
       name: 'App Workspace',
-      repositoryPath: '/srv/app',
+      repositoryPath: process.cwd(),
       defaultBranch: 'main',
       runtimeLabel: 'runtime-primary',
     })

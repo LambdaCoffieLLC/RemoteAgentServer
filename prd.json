@@ -80,7 +80,9 @@
         "Invalid or inaccessible paths are rejected with a clear error",
         "Users can list, inspect, and remove registered workspaces"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended apps/server/src/index.ts so workspace registration validates accessible git repository paths, derives a default branch from the repository when needed, and stores host/path/defaultBranch/runtimeAssociation metadata while preserving the existing workspace payload fields for compatibility. Added GET /v1/workspaces/:id and DELETE /v1/workspaces/:id alongside list/create behavior, updated .agents/ralph/tests/us-003-server-control-plane.test.ts to use a real repository path under the stricter validation, and added .agents/ralph/tests/us-006-register-workspaces.test.ts coverage for create/list/inspect/remove flows plus clear invalid-path rejection. Verified with pnpm test, pnpm build, pnpm lint, and pnpm typecheck."
     },
     {
       "id": "US-007",
