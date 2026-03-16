@@ -462,10 +462,20 @@ repo/
 - `pnpm build` builds every first-party workspace package with TypeScript.
 - `pnpm lint` applies the centralized ESLint rules to the repo and all workspaces.
 - `pnpm typecheck` runs root and workspace TypeScript checks.
-- `pnpm test` runs repo-level monorepo contract tests and the existing Ralph runner tests.
-- `pnpm verify` runs the full local and CI verification flow in one command.
+- `pnpm test` runs the product-owned repo test suites first and then the Ralph loop tests.
+- `pnpm verify` runs the full local and CI verification flow in one command, including product-owned tests plus Ralph loop tests.
 - `pnpm verify:ralph` keeps Ralph pointed at the same root verification flow.
 - `pnpm ralph` and `pnpm ralph:danger` continue to run the local Ralph automation.
+
+## Product Test Coverage
+
+Product behavior is owned by the repo-level `tests/` suite. Ralph-specific checks stay in `.agents/ralph/tests` and are not the sole proof for story completion.
+
+- Unit coverage: `tests/shared-packages.test.ts` exercises the shared package business logic and package contracts.
+- Integration coverage: `tests/server-control-plane.test.ts`, `tests/runtime-install.test.ts`, `tests/runtime-provider-adapters.test.ts`, `tests/session-diff-review.test.ts`, and `tests/session-recovery-clients.test.ts` cross real package boundaries for the server, runtime, and client wrappers.
+- Smoke coverage: `tests/web-client-smoke.test.ts` and `tests/mobile-app-smoke.test.ts` cover the primary operator journeys on the current client surfaces.
+- Command ownership: `pnpm run test:repo` executes the product-owned suites in `tests/**/*.test.ts`, `pnpm run test:ralph` executes `.agents/ralph/tests/*.test.ts`, and `pnpm test` or `pnpm verify` runs both layers.
+- Extension rule: future stories should add the lowest-layer product-owned test that proves the behavior change, then add or extend smoke coverage when the change is user-facing.
 
 ## Shared Package Boundaries
 

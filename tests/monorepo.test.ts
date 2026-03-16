@@ -86,7 +86,7 @@ test('workspace packages extend the centralized TypeScript config and expose bui
   }
 })
 
-test('README documents the root verification flow for local use and CI', () => {
+test('README documents the root verification flow, test ownership, and test scope', () => {
   const readme = readText('README.md')
 
   for (const command of ['pnpm install', 'pnpm build', 'pnpm lint', 'pnpm typecheck', 'pnpm test', 'pnpm verify']) {
@@ -96,4 +96,10 @@ test('README documents the root verification flow for local use and CI', () => {
   assert.match(readme, /local/i)
   assert.match(readme, /CI/)
   assert.match(readme, /\.github\/workflows\/verify\.yml/)
+  assert.match(readme, /Product Test Coverage/)
+  assert.match(readme, /unit/i)
+  assert.match(readme, /integration/i)
+  assert.match(readme, /smoke/i)
+  assert.match(readme, /product-owned/i)
+  assert.match(readme, /\.agents\/ralph\/tests/)
 })

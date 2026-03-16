@@ -323,7 +323,9 @@
         "The root verification command runs product-owned tests in addition to Ralph loop tests",
         "Test ownership and test scope are documented so future stories extend the right test layer"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended product-owned unit coverage in tests/shared-packages.test.ts to exercise shared package business logic defaults and factories across auth, protocol, ports, providers, sessions, and ui. Documented test ownership, test scope, and command wiring in README.md so future stories add coverage at the correct layer, and tightened tests/monorepo.test.ts to enforce that documentation plus the root verification contract. Existing product-owned integration and smoke coverage already lived in tests/server-control-plane.test.ts, tests/runtime-install.test.ts, tests/runtime-provider-adapters.test.ts, tests/session-diff-review.test.ts, tests/session-recovery-clients.test.ts, tests/web-client-smoke.test.ts, and tests/mobile-app-smoke.test.ts. Verified with pnpm verify, which runs lint, build, typecheck, product-owned repo tests via test:repo, and Ralph loop tests via test:ralph."
     },
     {
       "id": "US-022",
