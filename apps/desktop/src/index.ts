@@ -37,6 +37,8 @@ const actor: AuthenticatedActor = {
     'sessions:write',
     'approvals:read',
     'approvals:write',
+    'notifications:read',
+    'notifications:write',
     'ports:read',
   ],
 }
@@ -51,6 +53,8 @@ export type DesktopApprovalId = `approval_${string}`
 export type DesktopApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type DesktopSessionAction = 'pause' | 'resume' | 'cancel'
 export type DesktopWorkspaceSource = 'control-plane' | 'development-attach'
+export type DesktopNotificationId = `notification_${string}`
+export type DesktopNotificationCategory = 'approval-required' | 'session-failed' | 'session-completed' | 'port-exposed'
 
 export interface DesktopClientApprovalRecord {
   id: DesktopApprovalId
@@ -67,6 +71,40 @@ export interface DesktopClientApprovalRecord {
     id: string
     displayName: string
   }
+}
+
+export interface DesktopClientNotificationRecord {
+  id: DesktopNotificationId
+  category: DesktopNotificationCategory
+  title: string
+  message: string
+  createdAt: IsoTimestamp
+  sessionId?: SessionId
+  approvalId?: DesktopApprovalId
+  portId?: ForwardedPort['id']
+  deepLink?: string
+}
+
+export interface DesktopClientNotificationPreferences {
+  id: `notification_preference_${string}`
+  actorId: string
+  client: 'desktop'
+  enabled: boolean
+  categories: Record<DesktopNotificationCategory, boolean>
+  updatedAt: IsoTimestamp
+}
+
+export interface UpdateDesktopNotificationPreferencesInput {
+  enabled?: boolean
+  categories?: Partial<Record<DesktopNotificationCategory, boolean>>
+}
+
+export interface DesktopDeliveredNotification {
+  title: string
+  body: string
+  category: DesktopNotificationCategory
+  deepLink?: string
+  sessionId?: SessionId
 }
 
 export interface DesktopClientDashboard {
@@ -144,12 +182,23 @@ interface ControlPlaneSnapshotPayload {
 }
 
 /* eslint-disable no-unused-vars */
+export interface DesktopNotificationPresenter {
+  notify(notification: DesktopDeliveredNotification): Promise<unknown> | unknown
+}
+/* eslint-enable no-unused-vars */
+
+/* eslint-disable no-unused-vars */
 export interface DesktopControlPlaneClient {
   signIn: () => Promise<DesktopClientDashboard>
   createSession: (input: DesktopCreateSessionInput) => Promise<SessionSummary>
   applySessionAction: (sessionId: SessionId, action: DesktopSessionAction) => Promise<SessionSummary>
   listSessionEvents: (sessionId: SessionId) => Promise<SessionEvent[]>
   recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
+  listNotifications: () => Promise<DesktopClientNotificationRecord[]>
+  getNotificationPreferences: () => Promise<DesktopClientNotificationPreferences>
+  updateNotificationPreferences: (
+    input: UpdateDesktopNotificationPreferencesInput,
+  ) => Promise<DesktopClientNotificationPreferences>
   decideApproval: (
     approvalId: DesktopApprovalId,
     status: Extract<DesktopApprovalStatus, 'approved' | 'rejected'>,
@@ -304,6 +353,25 @@ export function createDesktopControlPlaneClient(options: DesktopControlPlaneClie
       )
       return createSessionRecovery(response.data)
     },
+    listNotifications: async () => {
+      const response = await request<DesktopClientNotificationRecord[]>('/v1/notifications')
+      return response.data.map(cloneNotification)
+    },
+    getNotificationPreferences: async () => {
+      const response = await request<DesktopClientNotificationPreferences>('/v1/notification-preferences/desktop')
+      return cloneNotificationPreferences(response.data)
+    },
+    updateNotificationPreferences: async (input) => {
+      const response = await request<DesktopClientNotificationPreferences>('/v1/notification-preferences/desktop', {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+        headers: {
+          'content-type': 'application/json',
+        },
+      })
+
+      return cloneNotificationPreferences(response.data)
+    },
     decideApproval: async (approvalId, status) => {
       const response = await request<DesktopClientApprovalRecord>(`/v1/approvals/${approvalId}`, {
         method: 'PATCH',
@@ -345,6 +413,49 @@ export function parseControlPlaneSseFrame(frame: string): DesktopControlPlaneEve
   }
 
   return JSON.parse(dataLines.join('\n')) as DesktopControlPlaneEvent
+}
+
+export function resolveDesktopNotificationDeepLink(
+  notification: Pick<DesktopClientNotificationRecord, 'deepLink' | 'sessionId'>,
+  baseUrl = 'remote-agent-desktop://app',
+) {
+  const path = notification.deepLink ?? (notification.sessionId ? `/sessions/${notification.sessionId}` : undefined)
+
+  if (!path) {
+    return undefined
+  }
+
+  return joinDeepLink(baseUrl, path)
+}
+
+export function shouldDeliverDesktopNotification(
+  notification: Pick<DesktopClientNotificationRecord, 'category'>,
+  preferences: DesktopClientNotificationPreferences,
+) {
+  return preferences.enabled && preferences.categories[notification.category] === true
+}
+
+export async function deliverDesktopNotification(
+  notification: DesktopClientNotificationRecord,
+  preferences: DesktopClientNotificationPreferences,
+  presenter: DesktopNotificationPresenter,
+  options: {
+    deepLinkBaseUrl?: string
+  } = {},
+) {
+  if (!shouldDeliverDesktopNotification(notification, preferences)) {
+    return false
+  }
+
+  await presenter.notify({
+    title: notification.title,
+    body: notification.message,
+    category: notification.category,
+    deepLink: resolveDesktopNotificationDeepLink(notification, options.deepLinkBaseUrl),
+    sessionId: notification.sessionId,
+  })
+
+  return true
 }
 
 export function applyDesktopControlPlaneEvent(
@@ -561,6 +672,12 @@ function ensureTrailingSlash(value: string) {
   return value.endsWith('/') ? value : `${value}/`
 }
 
+function joinDeepLink(baseUrl: string, path: string) {
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return `${normalizedBaseUrl}${normalizedPath}`
+}
+
 async function toDesktopClientRequestError(response: Response) {
   let message = `Request failed with status ${response.status}.`
   let code = 'request_failed'
@@ -683,6 +800,19 @@ function cloneApproval(approval: DesktopClientApprovalRecord) {
     ...approval,
     requestedBy: { ...approval.requestedBy },
     decidedBy: approval.decidedBy ? { ...approval.decidedBy } : undefined,
+  }
+}
+
+function cloneNotification(notification: DesktopClientNotificationRecord) {
+  return {
+    ...notification,
+  }
+}
+
+function cloneNotificationPreferences(preferences: DesktopClientNotificationPreferences) {
+  return {
+    ...preferences,
+    categories: { ...preferences.categories },
   }
 }
 

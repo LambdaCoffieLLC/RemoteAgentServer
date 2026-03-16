@@ -19,7 +19,16 @@ const actor: AuthenticatedActor = {
   id: 'user_mobile',
   kind: 'user',
   displayName: 'Mobile Operator',
-  scopes: ['hosts:read', 'workspaces:read', 'sessions:read', 'approvals:read', 'approvals:write', 'ports:read'],
+  scopes: [
+    'hosts:read',
+    'workspaces:read',
+    'sessions:read',
+    'approvals:read',
+    'approvals:write',
+    'notifications:read',
+    'notifications:write',
+    'ports:read',
+  ],
 }
 
 const hostId = 'host_mobile' as HostId
@@ -32,6 +41,8 @@ export type MobileApprovalId = `approval_${string}`
 export type MobileApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type MobileBrowseTarget = 'hosts' | 'sessions'
 export type MobilePreviewOpenMode = 'in-app' | 'system'
+export type MobileNotificationId = `notification_${string}`
+export type MobileNotificationCategory = 'approval-required' | 'session-failed' | 'session-completed' | 'port-exposed'
 
 export interface MobileClientHostRecord {
   id: HostId
@@ -86,6 +97,40 @@ export interface MobileClientApprovalRecord {
   }
 }
 
+export interface MobileClientNotificationRecord {
+  id: MobileNotificationId
+  category: MobileNotificationCategory
+  title: string
+  message: string
+  createdAt: IsoTimestamp
+  sessionId?: SessionId
+  approvalId?: MobileApprovalId
+  portId?: ForwardedPort['id']
+  deepLink?: string
+}
+
+export interface MobileClientNotificationPreferences {
+  id: `notification_preference_${string}`
+  actorId: string
+  client: 'mobile'
+  enabled: boolean
+  categories: Record<MobileNotificationCategory, boolean>
+  updatedAt: IsoTimestamp
+}
+
+export interface UpdateMobileNotificationPreferencesInput {
+  enabled?: boolean
+  categories?: Partial<Record<MobileNotificationCategory, boolean>>
+}
+
+export interface MobileDeliveredNotification {
+  title: string
+  body: string
+  category: MobileNotificationCategory
+  deepLink?: string
+  sessionId?: SessionId
+}
+
 export interface MobileClientDashboard {
   hosts: MobileClientHostRecord[]
   workspaces: MobileClientWorkspaceRecord[]
@@ -134,6 +179,12 @@ export interface MobilePreviewOpeners {
 }
 /* eslint-enable no-unused-vars */
 
+/* eslint-disable no-unused-vars */
+export interface MobileNotificationPresenter {
+  notify(notification: MobileDeliveredNotification): Promise<unknown> | unknown
+}
+/* eslint-enable no-unused-vars */
+
 interface JsonSuccessResponse<TData> {
   data: TData
 }
@@ -159,6 +210,11 @@ export interface MobileControlPlaneClient {
   signIn: () => Promise<MobileClientDashboard>
   listSessionEvents: (sessionId: SessionId) => Promise<SessionEvent[]>
   recoverSession: (sessionId: SessionId, query?: SessionRecoveryQuery) => Promise<SessionRecovery>
+  listNotifications: () => Promise<MobileClientNotificationRecord[]>
+  getNotificationPreferences: () => Promise<MobileClientNotificationPreferences>
+  updateNotificationPreferences: (
+    input: UpdateMobileNotificationPreferencesInput,
+  ) => Promise<MobileClientNotificationPreferences>
   promoteDetectedPort: (
     detectedPortId: DetectedPort['id'],
     options: PromoteDetectedPortOptions,
@@ -298,6 +354,24 @@ export function createMobileControlPlaneClient(options: MobileControlPlaneClient
       )
       return createSessionRecovery(response.data)
     },
+    listNotifications: async () => {
+      const response = await request<MobileClientNotificationRecord[]>('/v1/notifications')
+      return response.data.map(cloneNotification)
+    },
+    getNotificationPreferences: async () => {
+      const response = await request<MobileClientNotificationPreferences>('/v1/notification-preferences/mobile')
+      return cloneNotificationPreferences(response.data)
+    },
+    updateNotificationPreferences: async (input) => {
+      const response = await request<MobileClientNotificationPreferences>('/v1/notification-preferences/mobile', {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+        headers: {
+          'content-type': 'application/json',
+        },
+      })
+      return cloneNotificationPreferences(response.data)
+    },
     promoteDetectedPort: async (detectedPortId, promotion) => {
       const response = await request<{ detectedPort: DetectedPort; forwardedPort: ForwardedPort }>(
         `/v1/detected-ports/${detectedPortId}/forward`,
@@ -388,6 +462,49 @@ export async function openForwardedPreview(
   }
 
   return url
+}
+
+export function resolveMobileNotificationDeepLink(
+  notification: Pick<MobileClientNotificationRecord, 'deepLink' | 'sessionId'>,
+  baseUrl = 'remote-agent://app',
+) {
+  const path = notification.deepLink ?? (notification.sessionId ? `/sessions/${notification.sessionId}` : undefined)
+
+  if (!path) {
+    return undefined
+  }
+
+  return joinDeepLink(baseUrl, path)
+}
+
+export function shouldDeliverMobileNotification(
+  notification: Pick<MobileClientNotificationRecord, 'category'>,
+  preferences: MobileClientNotificationPreferences,
+) {
+  return preferences.enabled && preferences.categories[notification.category] === true
+}
+
+export async function deliverMobileNotification(
+  notification: MobileClientNotificationRecord,
+  preferences: MobileClientNotificationPreferences,
+  presenter: MobileNotificationPresenter,
+  options: {
+    deepLinkBaseUrl?: string
+  } = {},
+) {
+  if (!shouldDeliverMobileNotification(notification, preferences)) {
+    return false
+  }
+
+  await presenter.notify({
+    title: notification.title,
+    body: notification.message,
+    category: notification.category,
+    deepLink: resolveMobileNotificationDeepLink(notification, options.deepLinkBaseUrl),
+    sessionId: notification.sessionId,
+  })
+
+  return true
 }
 
 export function applyMobileControlPlaneEvent(
@@ -677,6 +794,19 @@ function cloneApproval(approval: MobileClientApprovalRecord) {
   }
 }
 
+function cloneNotification(notification: MobileClientNotificationRecord) {
+  return {
+    ...notification,
+  }
+}
+
+function cloneNotificationPreferences(preferences: MobileClientNotificationPreferences) {
+  return {
+    ...preferences,
+    categories: { ...preferences.categories },
+  }
+}
+
 function clonePorts(ports: ForwardedPort[]) {
   return ports.map((port) => createForwardedPort(port))
 }
@@ -696,4 +826,10 @@ function upsertById<TRecord extends { id: string }>(records: TRecord[], nextReco
 
   nextRecords[currentIndex] = nextRecord
   return nextRecords
+}
+
+function joinDeepLink(baseUrl: string, path: string) {
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return `${normalizedBaseUrl}${normalizedPath}`
 }

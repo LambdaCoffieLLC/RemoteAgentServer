@@ -12,6 +12,7 @@ export type AuthScope =
   | 'approvals:read'
   | 'approvals:write'
   | 'notifications:read'
+  | 'notifications:write'
   | 'ports:read'
   | 'ports:write'
 

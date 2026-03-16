@@ -65,7 +65,9 @@ export type AuditLogId = `audit_${string}`
 export type AuditLogAction = 'approval.requested' | 'approval.approved' | 'approval.rejected'
 export type AuditLogOutcome = 'requested' | 'approved' | 'rejected'
 export type NotificationId = `notification_${string}`
-export type NotificationCategory = 'approval-required' | 'session-status' | 'port-exposed'
+export type NotificationCategory = 'approval-required' | 'session-failed' | 'session-completed' | 'port-exposed'
+export type NotificationPreferenceId = `notification_preference_${string}`
+export type NotificationClient = 'mobile' | 'desktop'
 
 export interface HostRuntimeRecord extends RuntimeStatusSnapshot {
   label: string
@@ -134,6 +136,16 @@ export interface NotificationRecord {
   sessionId?: SessionId
   approvalId?: ApprovalId
   portId?: ForwardedPort['id']
+  deepLink?: string
+}
+
+export interface NotificationPreferenceRecord {
+  id: NotificationPreferenceId
+  actorId: string
+  client: NotificationClient
+  enabled: boolean
+  categories: Record<NotificationCategory, boolean>
+  updatedAt: IsoTimestamp
 }
 
 export interface ControlPlaneState {
@@ -146,6 +158,7 @@ export interface ControlPlaneState {
   ports: ForwardedPort[]
   detectedPorts: DetectedPort[]
   notifications: NotificationRecord[]
+  notificationPreferences: NotificationPreferenceRecord[]
 }
 
 export interface ControlPlaneEvent<TType extends string = string, TPayload = unknown> extends ProtocolEnvelope<TType, TPayload> {
@@ -269,6 +282,11 @@ interface DecideApprovalInput {
   decidedBy?: Pick<AuthenticatedActor, 'id' | 'displayName'>
 }
 
+interface UpdateNotificationPreferencesInput {
+  enabled?: boolean
+  categories?: Partial<Record<NotificationCategory, boolean>>
+}
+
 interface CreateForwardedPortInput {
   id: ForwardedPort['id']
   hostId: HostId
@@ -340,6 +358,7 @@ const defaultActors: Record<string, AuthenticatedActor> = {
       'approvals:read',
       'approvals:write',
       'notifications:read',
+      'notifications:write',
       'ports:read',
       'ports:write',
     ],
@@ -362,9 +381,17 @@ const emptyState: ControlPlaneState = {
   ports: [],
   detectedPorts: [],
   notifications: [],
+  notificationPreferences: [],
 }
 
 const defaultBootstrapTokens = ['bootstrap-development-runtime']
+const supportedNotificationClients: NotificationClient[] = ['mobile', 'desktop']
+const notificationCategories: NotificationCategory[] = [
+  'approval-required',
+  'session-failed',
+  'session-completed',
+  'port-exposed',
+]
 
 export function describeServerApp() {
   const provider = coreProviderDescriptors.find(({ id }) => id === 'codex') ?? coreProviderDescriptors[0]
@@ -387,6 +414,7 @@ export function describeServerApp() {
       'approvals:read',
       'approvals:write',
       'notifications:read',
+      'notifications:write',
       'ports:read',
       'ports:write',
     ]),
@@ -838,6 +866,10 @@ export class ControlPlaneServer {
       message: `${approval.action} requires review for ${approval.sessionId}.`,
       sessionId: approval.sessionId,
       approvalId: approval.id,
+      deepLink: buildNotificationDeepLink({
+        sessionId: approval.sessionId,
+        approvalId: approval.id,
+      }),
     })
     return approval
   }
@@ -1006,6 +1038,10 @@ export class ControlPlaneServer {
       message: `${port.label} is available on ${port.targetPort}.`,
       sessionId: port.sessionId,
       portId: port.id,
+      deepLink: buildNotificationDeepLink({
+        sessionId: port.sessionId,
+        portId: port.id,
+      }),
     })
     return port
   }
@@ -1192,6 +1228,32 @@ export class ControlPlaneServer {
     return [...this.state.notifications]
   }
 
+  async getNotificationPreferences(client: NotificationClient, actor: AuthenticatedActor) {
+    return cloneNotificationPreferences(this.resolveNotificationPreferences(actor.id, client))
+  }
+
+  async updateNotificationPreferences(
+    client: NotificationClient,
+    input: UpdateNotificationPreferencesInput,
+    actor: AuthenticatedActor,
+  ) {
+    const current = this.resolveNotificationPreferences(actor.id, client)
+    const updated: NotificationPreferenceRecord = {
+      ...current,
+      enabled: input.enabled ?? current.enabled,
+      categories: {
+        ...current.categories,
+        ...(input.categories ?? {}),
+      },
+      updatedAt: this.clock(),
+    }
+
+    this.state.notificationPreferences = upsertRecord(this.state.notificationPreferences, updated)
+    await this.persistState()
+    this.publishEvent('notification.preferences.updated', { preferences: updated })
+    return cloneNotificationPreferences(updated)
+  }
+
   async handleRequest(request: IncomingMessage, response: ServerResponse<IncomingMessage>) {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     const pathSegments = url.pathname.split('/').filter(Boolean)
@@ -1261,7 +1323,7 @@ export class ControlPlaneServer {
           return
         }
 
-        this.openEventStream(response)
+        this.openEventStream(response, actor)
         return
       }
 
@@ -1837,6 +1899,94 @@ export class ControlPlaneServer {
         return
       }
 
+      if (
+        request.method === 'GET' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'notification-preferences' &&
+        pathSegments[2] &&
+        !pathSegments[3]
+      ) {
+        const actor = this.authorizeRequest(request, response, 'notifications:read')
+
+        if (!actor) {
+          return
+        }
+
+        if (!supportedNotificationClients.includes(pathSegments[2] as NotificationClient)) {
+          this.writeError(response, 400, 'invalid_notification_client', 'Notification preferences require client=mobile or client=desktop.')
+          return
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.getNotificationPreferences(pathSegments[2] as NotificationClient, actor),
+        })
+        return
+      }
+
+      if (
+        request.method === 'PATCH' &&
+        pathSegments[0] === 'v1' &&
+        pathSegments[1] === 'notification-preferences' &&
+        pathSegments[2] &&
+        !pathSegments[3]
+      ) {
+        const actor = this.authorizeRequest(request, response, 'notifications:write')
+
+        if (!actor) {
+          return
+        }
+
+        if (!supportedNotificationClients.includes(pathSegments[2] as NotificationClient)) {
+          this.writeError(response, 400, 'invalid_notification_client', 'Notification preferences require client=mobile or client=desktop.')
+          return
+        }
+
+        const input = (await readJsonBody(request)) as Partial<UpdateNotificationPreferencesInput>
+
+        if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
+          this.writeError(
+            response,
+            400,
+            'invalid_notification_preferences',
+            'Notification preferences enabled must be a boolean when provided.',
+          )
+          return
+        }
+
+        if (input.categories !== undefined) {
+          if (typeof input.categories !== 'object' || Array.isArray(input.categories) || input.categories === null) {
+            this.writeError(
+              response,
+              400,
+              'invalid_notification_preferences',
+              'Notification preference categories must be an object when provided.',
+            )
+            return
+          }
+
+          for (const [category, enabled] of Object.entries(input.categories)) {
+            if (!notificationCategories.includes(category as NotificationCategory) || typeof enabled !== 'boolean') {
+              this.writeError(
+                response,
+                400,
+                'invalid_notification_preferences',
+                'Notification preference categories must only include known categories with boolean values.',
+              )
+              return
+            }
+          }
+        }
+
+        this.writeJson(response, 200, {
+          data: await this.updateNotificationPreferences(
+            pathSegments[2] as NotificationClient,
+            input as UpdateNotificationPreferencesInput,
+            actor,
+          ),
+        })
+        return
+      }
+
       this.writeError(response, 404, 'not_found', 'The requested control-plane endpoint was not found.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected control-plane failure.'
@@ -1898,7 +2048,8 @@ export class ControlPlaneServer {
     }
   }
 
-  private openEventStream(response: ServerResponse<IncomingMessage>) {
+  private openEventStream(response: ServerResponse<IncomingMessage>, _actor: AuthenticatedActor) {
+    void _actor
     response.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -2022,6 +2173,11 @@ export class ControlPlaneServer {
     return detectedPort
   }
 
+  private resolveNotificationPreferences(actorId: string, client: NotificationClient) {
+    const current = this.state.notificationPreferences.find((entry) => entry.actorId === actorId && entry.client === client)
+    return current ?? createDefaultNotificationPreferences(actorId, client, this.clock())
+  }
+
   private async expireForwardedPorts() {
     const now = this.clock()
     const expiredPorts = this.state.ports
@@ -2117,10 +2273,13 @@ export class ControlPlaneServer {
 
     await this.createNotification({
       id: toNotificationId(session.id),
-      category: 'session-status',
-      title: `Session ${session.status}`,
+      category: session.status === 'failed' ? 'session-failed' : 'session-completed',
+      title: session.status === 'failed' ? 'Session failed' : 'Session completed',
       message: `${session.id} is now ${session.status}.`,
       sessionId: session.id,
+      deepLink: buildNotificationDeepLink({
+        sessionId: session.id,
+      }),
     })
   }
 
@@ -2224,6 +2383,9 @@ function mergeState(seedState?: Partial<ControlPlaneState>): ControlPlaneState {
     ports: (seedState?.ports ?? emptyState.ports).map((port) => createForwardedPort(port)),
     detectedPorts: (seedState?.detectedPorts ?? emptyState.detectedPorts).map((port) => createDetectedPort(port)),
     notifications: [...(seedState?.notifications ?? emptyState.notifications)],
+    notificationPreferences: (seedState?.notificationPreferences ?? emptyState.notificationPreferences).map((preferences) =>
+      cloneNotificationPreferences(preferences),
+    ),
   }
 }
 
@@ -2245,6 +2407,7 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
     ports: state.ports.map((port) => createForwardedPort(port)),
     detectedPorts: state.detectedPorts.map((port) => createDetectedPort(port)),
     notifications: state.notifications.map((notification) => ({ ...notification })),
+    notificationPreferences: state.notificationPreferences.map((preferences) => cloneNotificationPreferences(preferences)),
   }
 }
 
@@ -2264,8 +2427,40 @@ function pickActorIdentity(actor?: AuthenticatedActor) {
       }
 }
 
+function createDefaultNotificationPreferences(
+  actorId: string,
+  client: NotificationClient,
+  updatedAt: IsoTimestamp,
+): NotificationPreferenceRecord {
+  return {
+    id: toNotificationPreferenceId(actorId, client),
+    actorId,
+    client,
+    enabled: false,
+    categories: notificationCategories.reduce<Record<NotificationCategory, boolean>>(
+      (current, category) => ({
+        ...current,
+        [category]: false,
+      }),
+      {} as Record<NotificationCategory, boolean>,
+    ),
+    updatedAt,
+  }
+}
+
+function cloneNotificationPreferences(preferences: NotificationPreferenceRecord): NotificationPreferenceRecord {
+  return {
+    ...preferences,
+    categories: { ...preferences.categories },
+  }
+}
+
 function toNotificationId(id: string): NotificationId {
   return `notification_${id.replace(/^[^_]+_/, '')}`
+}
+
+function toNotificationPreferenceId(actorId: string, client: NotificationClient): NotificationPreferenceId {
+  return `notification_preference_${actorId}_${client}`
 }
 
 function toAuditLogId(approvalId: ApprovalId, sequence: number): AuditLogId {
@@ -2298,6 +2493,33 @@ function mapLifecycleActionToStatus(action: SessionLifecycleActionInput['action'
   }
 
   return 'canceled'
+}
+
+function buildNotificationDeepLink(options: {
+  sessionId?: SessionId
+  approvalId?: ApprovalId
+  portId?: ForwardedPort['id']
+}) {
+  if (options.sessionId) {
+    const search = new URLSearchParams()
+
+    if (options.approvalId) {
+      search.set('approvalId', options.approvalId)
+    }
+
+    if (options.portId) {
+      search.set('portId', options.portId)
+    }
+
+    const query = search.toString()
+    return query.length > 0 ? `/sessions/${options.sessionId}?${query}` : `/sessions/${options.sessionId}`
+  }
+
+  if (options.portId) {
+    return `/ports/${options.portId}`
+  }
+
+  return undefined
 }
 
 function assertSessionStatusTransition(currentStatus: SessionStatus, nextStatus: SessionStatus) {

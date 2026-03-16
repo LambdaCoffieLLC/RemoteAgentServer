@@ -121,7 +121,7 @@ async function assertResourceSnapshot(origin: string) {
   assert.equal(ports.data.length, 1)
   assert.deepEqual(
     (notifications.data as Array<{ category: string }>).map((notification) => notification.category).sort(),
-    ['approval-required', 'port-exposed', 'session-status'],
+    ['approval-required', 'port-exposed', 'session-completed'],
   )
 }
 
