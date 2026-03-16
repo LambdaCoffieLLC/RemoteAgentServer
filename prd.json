@@ -338,7 +338,9 @@
         "The README explains the branch strategy for Ralph loop attempts and how to start a new attempt",
         "The README links to the deeper docs for runtime install, architecture, provider setup, and security expectations"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Reworked README.md into an operator/contributor entry point that now explains the product at a high level, names the major apps and packages, calls out what is runnable today, includes a practical quickstart for the control plane plus web and mobile clients, and provides copy-paste MVP smoke-test commands. Added a Ralph loop workflow section that explains the branch strategy tied to prd.json.branchName and how to start a new attempt, then linked the README to deeper docs in docs/runtime-install.md, docs/architecture.md, docs/provider-setup.md, and docs/security.md. Added repo-owned coverage in tests/monorepo.test.ts to enforce those README sections and linked docs. Verified with node --import tsx --test tests/monorepo.test.ts tests/shared-packages.test.ts."
     }
   ]
 }

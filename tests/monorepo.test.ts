@@ -103,3 +103,46 @@ test('README documents the root verification flow, test ownership, and test scop
   assert.match(readme, /product-owned/i)
   assert.match(readme, /\.agents\/ralph\/tests/)
 })
+
+test('README is an operator and contributor entry point with linked deeper docs', () => {
+  const readme = readText('README.md')
+
+  for (const section of [
+    'RemoteAgentServer',
+    'Quickstart',
+    'MVP Smoke Test',
+    'Ralph Loop Workflow',
+    'Deeper Docs',
+    'Repo Layout',
+  ]) {
+    assert.match(readme, new RegExp(section))
+  }
+
+  for (const repoPath of ['apps/server', 'apps/web', 'apps/mobile', 'apps/desktop', 'packages/runtime']) {
+    assert.match(readme, new RegExp(repoPath.replace('/', '\\/')))
+  }
+
+  assert.match(readme, /pnpm --filter @remote-agent-server\/server dev/)
+  assert.match(readme, /pnpm --filter @remote-agent-server\/web dev/)
+  assert.match(readme, /pnpm --filter @remote-agent-server\/mobile start/)
+  assert.match(readme, /\/api\/hosts/)
+  assert.match(readme, /\/api\/workspaces/)
+  assert.match(readme, /\/api\/sessions\/session-1\/changes/)
+  assert.match(readme, /prd\.json/)
+  assert.match(readme, /branchName/)
+  assert.match(readme, /pnpm verify:ralph/)
+  assert.match(readme, /pnpm ralph/)
+  assert.match(readme, /docs\/runtime-install\.md/)
+  assert.match(readme, /docs\/architecture\.md/)
+  assert.match(readme, /docs\/provider-setup\.md/)
+  assert.match(readme, /docs\/security\.md/)
+
+  for (const docPath of [
+    'docs/runtime-install.md',
+    'docs/architecture.md',
+    'docs/provider-setup.md',
+    'docs/security.md',
+  ]) {
+    assert.equal(existsSync(join(repoRoot, docPath)), true, `${docPath} should exist`)
+  }
+})
