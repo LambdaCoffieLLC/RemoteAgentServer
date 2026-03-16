@@ -304,7 +304,9 @@
         "Critical security-relevant events are not silently dropped",
         "The audit log survives restart and is covered by integration tests"
       ],
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Extended the control plane audit log in apps/server so sensitive actions now persist audit entries for session lifecycle changes, provider choice on session start, approval requests and decisions, and forwarded-port exposure changes. Added an operator-only inspection endpoint at GET /api/audit-log, made audited state mutations persist with their audit entries in the same write path so security-relevant events are not silently dropped, documented the manual smoke check in README.md, and added product-owned integration coverage in tests/server-control-plane.test.ts for authorized audit-log inspection, actor/target/timestamp/outcome fields, provider/session/approval/port entries, and restart persistence. Verified with pnpm exec tsc -p apps/server/tsconfig.json --noEmit, pnpm exec eslint apps/server/src/index.ts tests/server-control-plane.test.ts, node --import tsx --test tests/server-control-plane.test.ts, and pnpm exec tsc -p tsconfig.json --noEmit."
     },
     {
       "id": "US-020",

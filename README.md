@@ -175,6 +175,10 @@ curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/ports
 
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/audit-log
+
 curl -sS http://127.0.0.1:4318/ports/detected-workspace-workspace-1-4173
 ```
 
@@ -186,6 +190,7 @@ curl -sS http://127.0.0.1:4318/ports/detected-workspace-workspace-1-4173
 4. In the web client, enable `Attention alerts`, confirm the browser permission prompt succeeds, and verify approval-required, session-failed, or session-completed alerts can be muted per category and reopen the related session when clicked.
 5. In the web client, open the session review and confirm the diff includes `.remote-agent-smoke.txt`.
 6. Promote the detected preview from the web client and confirm the managed preview returns `preview-ok`.
+7. Fetch `/api/audit-log` with the operator token and confirm it contains session, approval, and port entries with actor, target, timestamp, and outcome fields.
 
 ### Clean Up The Smoke Test
 

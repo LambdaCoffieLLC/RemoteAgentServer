@@ -135,13 +135,14 @@ export interface ApprovalRecord {
 export interface AuditLogEntry {
   id: string
   timestamp: string
-  actor: 'operator'
-  action: 'approval.approved' | 'approval.rejected'
-  targetType: 'approval'
+  actor: 'bootstrap-token' | 'operator' | 'runtime' | 'system'
+  action: string
+  targetType: 'approval' | 'forwarded-port' | 'session'
   targetId: string
-  sessionId: string
-  outcome: 'approved' | 'rejected'
+  sessionId?: string
+  outcome: string
   detail: string
+  provider?: ProviderKind
 }
 
 export interface NotificationRecord {
@@ -1716,6 +1717,10 @@ function removeRecordById<TRecord extends { id: string }>(
   return record
 }
 
+function replaceArrayContents<TItem>(target: TItem[], source: TItem[]) {
+  target.splice(0, target.length, ...source)
+}
+
 function notFound(response: ServerResponse) {
   sendError(response, 404, 'Not found.')
 }
@@ -1778,23 +1783,37 @@ export async function startControlPlaneServer(
     collectionName: keyof ControlPlaneState,
     eventType: string,
     origin: ProtocolEnvelope['origin'] = 'server',
+    auditEntries: AuditLogEntry[] = [],
   ) {
     const collection = state[collectionName] as TRecord[]
-    if (
-      Array.isArray(collection) &&
-      record &&
-      typeof record === 'object' &&
-      'id' in (record as Record<string, unknown>)
-    ) {
-      upsertRecord(
-        collection as Array<{ id: string }>,
-        record as { id: string } & TRecord,
-      )
-    } else {
-      collection.push(record)
-    }
+    const previousCollection = [...collection]
+    const previousAuditLog = [...state.auditLog]
 
-    await persistCurrentState()
+    try {
+      if (
+        Array.isArray(collection) &&
+        record &&
+        typeof record === 'object' &&
+        'id' in (record as Record<string, unknown>)
+      ) {
+        upsertRecord(
+          collection as Array<{ id: string }>,
+          record as { id: string } & TRecord,
+        )
+      } else {
+        collection.push(record)
+      }
+
+      if (auditEntries.length > 0) {
+        state.auditLog.push(...auditEntries)
+      }
+
+      await persistCurrentState()
+    } catch (error) {
+      replaceArrayContents(collection, previousCollection)
+      replaceArrayContents(state.auditLog, previousAuditLog)
+      throw error
+    }
 
     broadcastEvent(createEvent(eventType, record, origin))
   }
@@ -1819,9 +1838,39 @@ export async function startControlPlaneServer(
     sendJson(response, 200, { data: removedRecord })
   }
 
-  async function appendAuditLogEntry(entry: AuditLogEntry) {
-    state.auditLog.push(entry)
-    await persistCurrentState()
+  function createAuditLogEntry({
+    actor,
+    action,
+    targetType,
+    targetId,
+    timestamp = new Date().toISOString(),
+    sessionId,
+    outcome,
+    detail,
+    provider,
+  }: {
+    actor: AuditLogEntry['actor']
+    action: AuditLogEntry['action']
+    targetType: AuditLogEntry['targetType']
+    targetId: string
+    timestamp?: string
+    sessionId?: string
+    outcome: string
+    detail: string
+    provider?: ProviderKind
+  }): AuditLogEntry {
+    return {
+      id: `audit-${randomUUID()}`,
+      timestamp,
+      actor,
+      action,
+      targetType,
+      targetId,
+      sessionId,
+      outcome,
+      detail,
+      provider,
+    }
   }
 
   function getForwardedPortSnapshot(record: ForwardedPortRecord) {
@@ -1999,7 +2048,13 @@ export async function startControlPlaneServer(
       expiresAt,
     })
 
-    await upsertAndBroadcast(promoted, 'forwardedPorts', 'port.promoted')
+    await upsertAndBroadcast(
+      promoted,
+      'forwardedPorts',
+      'port.promoted',
+      'server',
+      [createPortAuditLogEntry(promoted, 'port.promoted', 'operator')],
+    )
     return promoted
   }
 
@@ -2007,33 +2062,45 @@ export async function startControlPlaneServer(
     const now = Date.now()
     const timestamp = new Date(now).toISOString()
     const expiredRecords: ForwardedPortRecord[] = []
+    const auditEntries: AuditLogEntry[] = []
+    const previousForwardedPorts = [...state.forwardedPorts]
+    const previousAuditLog = [...state.auditLog]
 
-    for (let index = 0; index < state.forwardedPorts.length; index += 1) {
-      const current = getForwardedPortSnapshot(state.forwardedPorts[index])
+    try {
+      for (let index = 0; index < state.forwardedPorts.length; index += 1) {
+        const current = getForwardedPortSnapshot(state.forwardedPorts[index])
 
-      if (portIds && !portIds.includes(current.id)) {
-        continue
-      }
-
-      if (!shouldExpireForwardedPort(current, now)) {
-        if (state.forwardedPorts[index] !== current) {
-          state.forwardedPorts[index] = current
+        if (portIds && !portIds.includes(current.id)) {
+          continue
         }
-        continue
+
+        if (!shouldExpireForwardedPort(current, now)) {
+          if (state.forwardedPorts[index] !== current) {
+            state.forwardedPorts[index] = current
+          }
+          continue
+        }
+
+        const expired = getForwardedPortSnapshot(
+          markForwardedPortExpired(current, timestamp),
+        )
+        state.forwardedPorts[index] = expired
+        expiredRecords.push(expired)
+        auditEntries.push(createPortAuditLogEntry(expired, 'port.expired', 'system'))
       }
 
-      const expired = getForwardedPortSnapshot(
-        markForwardedPortExpired(current, timestamp),
-      )
-      state.forwardedPorts[index] = expired
-      expiredRecords.push(expired)
+      if (expiredRecords.length === 0) {
+        return []
+      }
+
+      state.auditLog.push(...auditEntries)
+      await persistCurrentState()
+    } catch (error) {
+      replaceArrayContents(state.forwardedPorts, previousForwardedPorts)
+      replaceArrayContents(state.auditLog, previousAuditLog)
+      throw error
     }
 
-    if (expiredRecords.length === 0) {
-      return []
-    }
-
-    await persistCurrentState()
     for (const expiredRecord of expiredRecords) {
       broadcastEvent(createEvent('port.expired', expiredRecord))
     }
@@ -2050,8 +2117,7 @@ export async function startControlPlaneServer(
       )
     }
 
-    return {
-      id: `audit-${randomUUID()}`,
+    return createAuditLogEntry({
       timestamp: approval.decidedAt,
       actor: 'operator',
       action:
@@ -2063,7 +2129,62 @@ export async function startControlPlaneServer(
       sessionId: approval.sessionId,
       outcome: approval.status,
       detail: approval.message,
-    }
+      provider: approval.provider,
+    })
+  }
+
+  function createApprovalRequestedAuditLogEntry(
+    approval: ApprovalRecord,
+  ): AuditLogEntry {
+    return createAuditLogEntry({
+      timestamp: approval.requestedAt,
+      actor: 'runtime',
+      action: 'approval.requested',
+      targetType: 'approval',
+      targetId: approval.id,
+      sessionId: approval.sessionId,
+      outcome: approval.status,
+      detail: approval.message,
+      provider: approval.provider,
+    })
+  }
+
+  function createSessionAuditLogEntry(
+    session: SessionRecord,
+    actor: AuditLogEntry['actor'],
+    detail: string,
+    timestamp = session.updatedAt,
+  ): AuditLogEntry {
+    return createAuditLogEntry({
+      timestamp,
+      actor,
+      action: `session.${session.state}`,
+      targetType: 'session',
+      targetId: session.id,
+      sessionId: session.id,
+      outcome: session.state,
+      detail,
+      provider: session.provider as ProviderKind,
+    })
+  }
+
+  function createPortAuditLogEntry(
+    port: ForwardedPortRecord,
+    action: AuditLogEntry['action'],
+    actor: AuditLogEntry['actor'],
+  ): AuditLogEntry {
+    const forwardingState =
+      port.state === 'detected' ? 'detected' : (port.forwardingState ?? 'closed')
+
+    return createAuditLogEntry({
+      actor,
+      action,
+      targetType: 'forwarded-port',
+      targetId: port.id,
+      sessionId: port.sessionId,
+      outcome: forwardingState,
+      detail: `${port.visibility} ${port.protocol} port ${port.port} on ${port.targetHost}`,
+    })
   }
 
   async function requestSessionApproval(
@@ -2084,7 +2205,13 @@ export async function startControlPlaneServer(
       decidedAt: undefined,
     }
 
-    await upsertAndBroadcast(approval, 'approvals', 'approval.requested')
+    await upsertAndBroadcast(
+      approval,
+      'approvals',
+      'approval.requested',
+      'server',
+      [createApprovalRequestedAuditLogEntry(approval)],
+    )
 
     return await new Promise<ProviderApprovalDecision>((resolve, reject) => {
       pendingApprovalDecisions.set(approval.id, {
@@ -2116,25 +2243,64 @@ export async function startControlPlaneServer(
 
   async function persistSessionSnapshot(
     snapshot: ReturnType<RuntimeSessionHandle['getSnapshot']>,
+    auditEntry?: AuditLogEntry,
   ) {
-    const record = updateSession(state, snapshot.session.id, {
-      state: snapshot.session.state,
-      updatedAt: snapshot.updatedAt,
-      startedAt: snapshot.startedAt,
-      completedAt: snapshot.completedAt,
-      logs: snapshot.logs,
-      output: snapshot.output,
-    })
+    const previousSessions = [...state.sessions]
+    const previousAuditLog = [...state.auditLog]
 
-    await persistCurrentState()
-    return record
+    try {
+      const record = updateSession(state, snapshot.session.id, {
+        state: snapshot.session.state,
+        updatedAt: snapshot.updatedAt,
+        startedAt: snapshot.startedAt,
+        completedAt: snapshot.completedAt,
+        logs: snapshot.logs,
+        output: snapshot.output,
+      })
+
+      if (auditEntry) {
+        state.auditLog.push(auditEntry)
+      }
+
+      await persistCurrentState()
+      return record
+    } catch (error) {
+      replaceArrayContents(state.sessions, previousSessions)
+      replaceArrayContents(state.auditLog, previousAuditLog)
+      throw error
+    }
   }
 
   function attachRuntimeSession(handle: RuntimeSessionHandle) {
     activeRuntimeHandles.set(handle.id, handle)
     const unsubscribe = handle.subscribe((event) => {
       void (async () => {
-        const record = await persistSessionSnapshot(handle.getSnapshot())
+        const snapshot = handle.getSnapshot()
+        const currentSession = requireSession(state, snapshot.session.id)
+        const detail =
+          event.type === 'session.state.changed'
+            ? (event.payload as { detail?: string }).detail ??
+              `Session entered ${snapshot.session.state}.`
+            : undefined
+        const record = await persistSessionSnapshot(
+          snapshot,
+          event.type === 'session.state.changed'
+            ? createSessionAuditLogEntry(
+                {
+                  ...currentSession,
+                  state: snapshot.session.state,
+                  updatedAt: snapshot.updatedAt,
+                  startedAt: snapshot.startedAt,
+                  completedAt: snapshot.completedAt,
+                  logs: snapshot.logs,
+                  output: snapshot.output,
+                },
+                'runtime',
+                detail ?? `Session entered ${snapshot.session.state}.`,
+                event.timestamp,
+              )
+            : undefined,
+        )
         broadcastEvent(
           createEvent(
             event.type,
@@ -2179,7 +2345,20 @@ export async function startControlPlaneServer(
       logs: [],
       output: [],
     }
-    await upsertAndBroadcast(session, 'sessions', 'session.upserted')
+    await upsertAndBroadcast(
+      session,
+      'sessions',
+      'session.upserted',
+      'server',
+      [
+        createSessionAuditLogEntry(
+          session,
+          'operator',
+          `Queued ${session.provider} session for workspace "${session.workspaceId}".`,
+          session.createdAt,
+        ),
+      ],
+    )
 
     const handle = runtimeSessions.startSession({
       sessionId: session.id,
@@ -2213,7 +2392,25 @@ export async function startControlPlaneServer(
       handle.cancel()
     }
 
-    return await persistSessionSnapshot(handle.getSnapshot())
+    const snapshot = handle.getSnapshot()
+    const currentSession = requireSession(state, sessionId)
+    return await persistSessionSnapshot(
+      snapshot,
+      createSessionAuditLogEntry(
+        {
+          ...currentSession,
+          state: snapshot.session.state,
+          updatedAt: snapshot.updatedAt,
+          startedAt: snapshot.startedAt,
+          completedAt: snapshot.completedAt,
+          logs: snapshot.logs,
+          output: snapshot.output,
+        },
+        'operator',
+        `${action[0].toUpperCase()}${action.slice(1)} requested by operator.`,
+        snapshot.updatedAt,
+      ),
+    )
   }
 
   async function openForwardedPort(portId: string, body: unknown) {
@@ -2248,7 +2445,13 @@ export async function startControlPlaneServer(
       expiresAt,
     })
 
-    await upsertAndBroadcast(reopened, 'forwardedPorts', 'port.opened')
+    await upsertAndBroadcast(
+      reopened,
+      'forwardedPorts',
+      'port.opened',
+      'server',
+      [createPortAuditLogEntry(reopened, 'port.opened', 'operator')],
+    )
     return reopened
   }
 
@@ -2265,7 +2468,13 @@ export async function startControlPlaneServer(
       closedAt: new Date().toISOString(),
     })
 
-    await upsertAndBroadcast(closed, 'forwardedPorts', 'port.closed')
+    await upsertAndBroadcast(
+      closed,
+      'forwardedPorts',
+      'port.closed',
+      'server',
+      [createPortAuditLogEntry(closed, 'port.closed', 'operator')],
+    )
     return closed
   }
 
@@ -2283,7 +2492,13 @@ export async function startControlPlaneServer(
     const expired = getForwardedPortSnapshot(
       markForwardedPortExpired(current, new Date().toISOString()),
     )
-    await upsertAndBroadcast(expired, 'forwardedPorts', 'port.expired')
+    await upsertAndBroadcast(
+      expired,
+      'forwardedPorts',
+      'port.expired',
+      'server',
+      [createPortAuditLogEntry(expired, 'port.expired', 'operator')],
+    )
     return expired
   }
 
@@ -2636,9 +2851,33 @@ export async function startControlPlaneServer(
         return
       }
 
+      if (request.method === 'GET' && pathname === '/api/audit-log') {
+        sendJson(response, 200, { data: state.auditLog })
+        return
+      }
+
       if (request.method === 'POST' && pathname === '/api/approvals') {
         const approval = requireApprovalRecord(await readJsonBody(request))
-        await commit(response, approval, 'approvals', 'approval.upserted')
+        await upsertAndBroadcast(
+          approval,
+          'approvals',
+          'approval.upserted',
+          'server',
+          [
+            createAuditLogEntry({
+              timestamp: approval.decidedAt ?? approval.requestedAt,
+              actor: 'operator',
+              action: 'approval.upserted',
+              targetType: 'approval',
+              targetId: approval.id,
+              sessionId: approval.sessionId,
+              outcome: approval.status,
+              detail: approval.message,
+              provider: approval.provider,
+            }),
+          ],
+        )
+        sendJson(response, 201, { data: approval })
         return
       }
 
@@ -2680,8 +2919,9 @@ export async function startControlPlaneServer(
           updatedApproval,
           'approvals',
           'approval.decided',
+          'server',
+          [createApprovalAuditLogEntry(updatedApproval)],
         )
-        await appendAuditLogEntry(createApprovalAuditLogEntry(updatedApproval))
 
         const pendingDecision = pendingApprovalDecisions.get(approvalId)
         if (pendingDecision) {
@@ -2777,7 +3017,14 @@ export async function startControlPlaneServer(
           )
         }
 
-        await commit(response, forwardedPort, 'forwardedPorts', 'port.upserted')
+        await upsertAndBroadcast(
+          forwardedPort,
+          'forwardedPorts',
+          'port.upserted',
+          'server',
+          [createPortAuditLogEntry(forwardedPort, 'port.upserted', 'operator')],
+        )
+        sendJson(response, 201, { data: forwardedPort })
         return
       }
 

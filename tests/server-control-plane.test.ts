@@ -728,9 +728,23 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
   assert.equal(persistedState.workspaces.length, 1)
   assert.equal(persistedState.sessions.length, 1)
   assert.equal(persistedState.approvals.length, 1)
-  assert.equal(persistedState.auditLog.length, 0)
+  assert.equal(persistedState.auditLog.length > 0, true)
   assert.equal(persistedState.notifications.length, 1)
   assert.equal(persistedState.forwardedPorts.length, 1)
+  assert.equal(
+    persistedState.auditLog.some((entry) => {
+      const record = entry as { action?: string; targetId?: string }
+      return record.action === 'session.queued' && record.targetId === 'session-1'
+    }),
+    true,
+  )
+  assert.equal(
+    persistedState.auditLog.some((entry) => {
+      const record = entry as { action?: string; targetId?: string }
+      return record.action === 'port.upserted' && record.targetId === 'port-1'
+    }),
+    true,
+  )
 
   const restartedServer = await startControlPlaneServer({
     configFile,
@@ -760,6 +774,24 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
         `${key} should survive restart`,
       )
     }
+
+    const auditLogResponse = await fetch(`${restartedServer.url}/api/audit-log`, {
+      headers: {
+        authorization: 'Bearer config-operator-secret',
+      },
+    })
+    assert.equal(auditLogResponse.status, 200)
+    const auditLog = (await readJson(auditLogResponse)).data as Array<{
+      action: string
+      targetId: string
+    }>
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.action === 'session.queued' && entry.targetId === 'session-1',
+      ),
+      true,
+    )
   } finally {
     await restartedServer.close()
   }
@@ -1456,6 +1488,236 @@ test('control plane runs approval requests through client decisions, audit loggi
       true,
     )
   } finally {
+    await server.close()
+  }
+})
+
+test('authorized users can inspect audit log entries for sessions, approvals, providers, and port exposure changes', async () => {
+  const tempDir = await createTempDir()
+  const dataFile = join(tempDir, 'audit-state.json')
+  const repositoryPath = await createGitRepository(tempDir, 'audit-repo')
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile,
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+    runtimeProviderAdapters: [
+      createCodexProviderAdapter({
+        approvals: [
+          {
+            action: 'sudo systemctl restart preview.service',
+            message: 'Approval required for restarting the preview service.',
+            afterStep: 1,
+          },
+        ],
+      }),
+    ],
+  })
+
+  const approvalClient = createApprovalClient({
+    baseUrl: server.url,
+    token: 'operator-secret',
+  })
+
+  let eventStream:
+    | Awaited<ReturnType<typeof openEventStream>>
+    | undefined
+
+  try {
+    const hostResponse = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-audit',
+        name: 'audit-devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostResponse.status, 201)
+
+    const workspaceResponse = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-audit',
+        hostId: 'host-audit',
+        path: repositoryPath,
+        runtimeHostId: 'host-audit',
+      }),
+    })
+    assert.equal(workspaceResponse.status, 201)
+
+    eventStream = await openEventStream(server.url, 'operator-secret')
+
+    const sessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-audit',
+        workspaceId: 'workspace-audit',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(sessionResponse.status, 201)
+
+    const approvalRequestedEvent = await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as { sessionId?: string }
+      return (
+        event.envelope.type === 'approval.requested' &&
+        payload.sessionId === 'session-audit'
+      )
+    })
+    const approvalRequest = approvalRequestedEvent.envelope.payload as {
+      id: string
+      status: string
+    }
+    assert.equal(approvalRequest.status, 'pending')
+
+    const approvalDecision = await approvalClient.decideApproval(
+      approvalRequest.id,
+      'approved',
+    )
+    assert.equal(approvalDecision.status, 'approved')
+
+    await eventStream.nextEvent((event) => {
+      const payload = event.envelope.payload as {
+        session?: { id?: string; state?: string }
+      }
+      return (
+        event.envelope.type === 'session.state.changed' &&
+        payload.session?.id === 'session-audit' &&
+        payload.session.state === 'completed'
+      )
+    })
+
+    const portResponse = await fetch(`${server.url}/api/ports`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'port-audit',
+        hostId: 'host-audit',
+        workspaceId: 'workspace-audit',
+        sessionId: 'session-audit',
+        port: 4173,
+        protocol: 'http',
+        visibility: 'shared',
+        state: 'forwarded',
+        label: 'Audit Preview',
+        targetHost: '127.0.0.1',
+      }),
+    })
+    assert.equal(portResponse.status, 201)
+
+    const closePortResponse = await fetch(
+      `${server.url}/api/ports/port-audit/close`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
+    assert.equal(closePortResponse.status, 200)
+
+    const unauthorizedAuditResponse = await fetch(`${server.url}/api/audit-log`)
+    assert.equal(unauthorizedAuditResponse.status, 401)
+
+    const auditLogResponse = await fetch(`${server.url}/api/audit-log`, {
+      headers: {
+        authorization: 'Bearer operator-secret',
+      },
+    })
+    assert.equal(auditLogResponse.status, 200)
+    const auditLog = (await readJson(auditLogResponse)).data as Array<{
+      actor: string
+      action: string
+      detail: string
+      outcome: string
+      provider?: string
+      sessionId?: string
+      targetId: string
+      targetType: string
+      timestamp: string
+    }>
+
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'operator' &&
+          entry.action === 'session.queued' &&
+          entry.targetType === 'session' &&
+          entry.targetId === 'session-audit' &&
+          entry.provider === 'codex' &&
+          entry.outcome === 'queued' &&
+          entry.detail.includes('Queued codex session') &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'runtime' &&
+          entry.action === 'session.completed' &&
+          entry.targetType === 'session' &&
+          entry.targetId === 'session-audit' &&
+          entry.outcome === 'completed' &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'runtime' &&
+          entry.action === 'approval.requested' &&
+          entry.targetType === 'approval' &&
+          entry.targetId === approvalRequest.id &&
+          entry.sessionId === 'session-audit' &&
+          entry.outcome === 'pending' &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'operator' &&
+          entry.action === 'approval.approved' &&
+          entry.targetType === 'approval' &&
+          entry.targetId === approvalRequest.id &&
+          entry.outcome === 'approved' &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'operator' &&
+          entry.action === 'port.upserted' &&
+          entry.targetType === 'forwarded-port' &&
+          entry.targetId === 'port-audit' &&
+          entry.outcome === 'open' &&
+          entry.detail.includes('shared http port 4173') &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+    assert.equal(
+      auditLog.some(
+        (entry) =>
+          entry.actor === 'operator' &&
+          entry.action === 'port.closed' &&
+          entry.targetType === 'forwarded-port' &&
+          entry.targetId === 'port-audit' &&
+          entry.outcome === 'closed' &&
+          entry.timestamp.length > 0,
+      ),
+      true,
+    )
+  } finally {
+    await eventStream?.close()
     await server.close()
   }
 })
