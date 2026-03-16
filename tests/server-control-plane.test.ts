@@ -1,12 +1,23 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { access, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile,
+} from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 import { createApprovalClient } from '../apps/web/src/index.js'
-import { startControlPlaneServer, type ControlPlaneEvent } from '../apps/server/src/index.js'
+import {
+  startControlPlaneServer,
+  type ControlPlaneEvent,
+} from '../apps/server/src/index.js'
 import { createCodexProviderAdapter } from '../packages/runtime/src/index.js'
 
 const execFileAsync = promisify(execFile)
@@ -40,6 +51,42 @@ async function createGitRepository(rootDir: string, repoName = 'repo') {
   return realpath(repositoryPath)
 }
 
+async function createPreviewServer() {
+  const server = createHttpServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+    response.end(`preview:${request.url ?? '/'}`)
+  })
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', rejectListen)
+      resolveListen()
+    })
+  })
+
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('Preview server failed to bind to a TCP port.')
+  }
+
+  return {
+    port: address.port,
+    async close() {
+      await new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) {
+            rejectClose(error)
+            return
+          }
+
+          resolveClose()
+        })
+      })
+    },
+  }
+}
+
 async function waitForEvent(
   baseUrl: string,
   token: string,
@@ -63,7 +110,9 @@ async function waitForEvent(
     while (true) {
       const { done, value } = await reader.read()
       if (done) {
-        throw new Error('Event stream closed before the expected event arrived.')
+        throw new Error(
+          'Event stream closed before the expected event arrived.',
+        )
       }
 
       buffer += decoder.decode(value, { stream: true })
@@ -82,7 +131,9 @@ async function waitForEvent(
           continue
         }
 
-        const event = JSON.parse(dataLine.slice('data: '.length)) as ControlPlaneEvent
+        const event = JSON.parse(
+          dataLine.slice('data: '.length),
+        ) as ControlPlaneEvent
         if (predicate(event)) {
           return event
         }
@@ -93,7 +144,11 @@ async function waitForEvent(
   }
 }
 
-async function openEventStream(baseUrl: string, token: string, lastEventId?: string) {
+async function openEventStream(
+  baseUrl: string,
+  token: string,
+  lastEventId?: string,
+) {
   const response = await fetch(`${baseUrl}/api/events`, {
     headers: {
       authorization: `Bearer ${token}`,
@@ -114,7 +169,9 @@ async function openEventStream(baseUrl: string, token: string, lastEventId?: str
       while (true) {
         const { done, value } = await reader.read()
         if (done) {
-          throw new Error('Event stream closed before the expected event arrived.')
+          throw new Error(
+            'Event stream closed before the expected event arrived.',
+          )
         }
 
         buffer += decoder.decode(value, { stream: true })
@@ -133,7 +190,9 @@ async function openEventStream(baseUrl: string, token: string, lastEventId?: str
             continue
           }
 
-          const event = JSON.parse(dataLine.slice('data: '.length)) as ControlPlaneEvent
+          const event = JSON.parse(
+            dataLine.slice('data: '.length),
+          ) as ControlPlaneEvent
           if (predicate(event)) {
             return event
           }
@@ -349,10 +408,321 @@ test('control plane persists hosts, workspaces, sessions, approvals, notificatio
       })
 
       assert.equal(response.status, 200)
-      assert.equal(((await readJson(response)).data as unknown[]).length, 1, `${key} should survive restart`)
+      assert.equal(
+        ((await readJson(response)).data as unknown[]).length,
+        1,
+        `${key} should survive restart`,
+      )
     }
   } finally {
     await restartedServer.close()
+  }
+})
+
+test('control plane forwards ports with filtered active listings, managed URLs, visibility controls, and expiration', async () => {
+  const tempDir = await createTempDir()
+  const dataFile = join(tempDir, 'state.json')
+  const repositoryPath = await createGitRepository(tempDir)
+  const previewServer = await createPreviewServer()
+  const server = await startControlPlaneServer({
+    port: 0,
+    dataFile,
+    operatorTokens: ['operator-secret'],
+    bootstrapTokens: ['bootstrap-secret'],
+    runtimeProviderAdapters: [createCodexProviderAdapter()],
+  })
+
+  try {
+    const hostResponse = await fetch(`${server.url}/api/hosts`, {
+      method: 'POST',
+      headers: bootstrapHeaders('bootstrap-secret'),
+      body: JSON.stringify({
+        id: 'host-1',
+        name: 'devbox',
+        platform: 'linux',
+        runtimeVersion: '0.1.0',
+        status: 'online',
+      }),
+    })
+    assert.equal(hostResponse.status, 201)
+
+    const workspaceResponse = await fetch(`${server.url}/api/workspaces`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'workspace-1',
+        hostId: 'host-1',
+        path: repositoryPath,
+        runtimeHostId: 'host-1',
+      }),
+    })
+    assert.equal(workspaceResponse.status, 201)
+
+    const sessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'session-1',
+        workspaceId: 'workspace-1',
+        provider: 'codex',
+      }),
+    })
+    assert.equal(sessionResponse.status, 201)
+
+    const sharedPortResponse = await fetch(`${server.url}/api/ports`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'preview-shared',
+        hostId: 'host-1',
+        workspaceId: 'workspace-1',
+        sessionId: 'session-1',
+        port: previewServer.port,
+        protocol: 'http',
+        visibility: 'shared',
+        label: 'Shared Preview',
+        targetHost: '127.0.0.1',
+      }),
+    })
+    assert.equal(sharedPortResponse.status, 201)
+    const sharedPort = (await readJson(sharedPortResponse)).data as {
+      managedUrl: string
+      forwardingState: string
+      workspaceId: string
+      sessionId: string
+    }
+    assert.equal(sharedPort.forwardingState, 'open')
+    assert.equal(sharedPort.workspaceId, 'workspace-1')
+    assert.equal(sharedPort.sessionId, 'session-1')
+    assert.equal(sharedPort.managedUrl, `${server.url}/ports/preview-shared`)
+
+    const privatePortResponse = await fetch(`${server.url}/api/ports`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'preview-private',
+        hostId: 'host-1',
+        workspaceId: 'workspace-1',
+        sessionId: 'session-1',
+        port: previewServer.port,
+        protocol: 'http',
+        visibility: 'private',
+        label: 'Private Preview',
+        targetHost: '127.0.0.1',
+      }),
+    })
+    assert.equal(privatePortResponse.status, 201)
+    const privatePort = (await readJson(privatePortResponse)).data as {
+      managedUrl: string
+      visibility: string
+    }
+    assert.equal(privatePort.visibility, 'private')
+
+    const tcpPortResponse = await fetch(`${server.url}/api/ports`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'postgres-1',
+        hostId: 'host-1',
+        workspaceId: 'workspace-1',
+        sessionId: 'session-1',
+        port: 5432,
+        protocol: 'tcp',
+        visibility: 'private',
+        label: 'Postgres',
+        targetHost: '127.0.0.1',
+      }),
+    })
+    assert.equal(tcpPortResponse.status, 201)
+    const tcpPort = (await readJson(tcpPortResponse)).data as {
+      protocol: string
+      managedUrl?: string
+    }
+    assert.equal(tcpPort.protocol, 'tcp')
+    assert.equal(tcpPort.managedUrl, undefined)
+
+    const workspacePortsResponse = await fetch(
+      `${server.url}/api/ports?workspaceId=workspace-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(workspacePortsResponse.status, 200)
+    const workspacePorts = (await readJson(workspacePortsResponse))
+      .data as Array<{ id: string }>
+    assert.deepEqual(workspacePorts.map((entry) => entry.id).sort(), [
+      'postgres-1',
+      'preview-private',
+      'preview-shared',
+    ])
+
+    const sessionPortsResponse = await fetch(
+      `${server.url}/api/ports?sessionId=session-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(sessionPortsResponse.status, 200)
+    const sessionPorts = (await readJson(sessionPortsResponse)).data as Array<{
+      id: string
+    }>
+    assert.deepEqual(sessionPorts.map((entry) => entry.id).sort(), [
+      'postgres-1',
+      'preview-private',
+      'preview-shared',
+    ])
+
+    const sharedPreviewResponse = await fetch(
+      `${sharedPort.managedUrl}/nested/path?source=shared`,
+    )
+    assert.equal(sharedPreviewResponse.status, 200)
+    assert.equal(
+      await sharedPreviewResponse.text(),
+      'preview:/nested/path?source=shared',
+    )
+
+    const privatePreviewUnauthorized = await fetch(
+      `${privatePort.managedUrl}/private`,
+    )
+    assert.equal(privatePreviewUnauthorized.status, 401)
+
+    const privatePreviewAuthorized = await fetch(
+      `${privatePort.managedUrl}/private`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(privatePreviewAuthorized.status, 200)
+    assert.equal(await privatePreviewAuthorized.text(), 'preview:/private')
+
+    const closePortResponse = await fetch(
+      `${server.url}/api/ports/preview-shared/close`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
+    assert.equal(closePortResponse.status, 200)
+    assert.equal(
+      ((await readJson(closePortResponse)).data as { forwardingState: string })
+        .forwardingState,
+      'closed',
+    )
+
+    const activePortsAfterCloseResponse = await fetch(
+      `${server.url}/api/ports?workspaceId=workspace-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(activePortsAfterCloseResponse.status, 200)
+    const activePortsAfterClose = (
+      await readJson(activePortsAfterCloseResponse)
+    ).data as Array<{ id: string }>
+    assert.deepEqual(activePortsAfterClose.map((entry) => entry.id).sort(), [
+      'postgres-1',
+      'preview-private',
+    ])
+
+    const closedManagedUrlResponse = await fetch(sharedPort.managedUrl)
+    assert.equal(closedManagedUrlResponse.status, 409)
+
+    const reopenPortResponse = await fetch(
+      `${server.url}/api/ports/preview-shared/open`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
+    assert.equal(reopenPortResponse.status, 200)
+    assert.equal(
+      ((await readJson(reopenPortResponse)).data as { forwardingState: string })
+        .forwardingState,
+      'open',
+    )
+
+    const expiringPortResponse = await fetch(`${server.url}/api/ports`, {
+      method: 'POST',
+      headers: operatorHeaders('operator-secret'),
+      body: JSON.stringify({
+        id: 'preview-expiring',
+        hostId: 'host-1',
+        workspaceId: 'workspace-1',
+        sessionId: 'session-1',
+        port: previewServer.port,
+        protocol: 'http',
+        visibility: 'shared',
+        label: 'Expiring Preview',
+        targetHost: '127.0.0.1',
+      }),
+    })
+    assert.equal(expiringPortResponse.status, 201)
+
+    const expiresAt = new Date(Date.now() - 60_000).toISOString()
+    const markExpiringResponse = await fetch(
+      `${server.url}/api/ports/preview-expiring/open`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+        body: JSON.stringify({ expiresAt }),
+      },
+    )
+    assert.equal(markExpiringResponse.status, 200)
+
+    const allPortsResponse = await fetch(
+      `${server.url}/api/ports?workspaceId=workspace-1&includeInactive=true`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(allPortsResponse.status, 200)
+    const allPorts = (await readJson(allPortsResponse)).data as Array<{
+      id: string
+      forwardingState: string
+      expiredAt?: string
+    }>
+    const expiredPort = allPorts.find(
+      (entry) => entry.id === 'preview-expiring',
+    )
+    assert.ok(expiredPort)
+    assert.equal(expiredPort.forwardingState, 'expired')
+    assert.equal(typeof expiredPort.expiredAt, 'string')
+
+    const activePortsAfterExpireResponse = await fetch(
+      `${server.url}/api/ports?sessionId=session-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
+      },
+    )
+    assert.equal(activePortsAfterExpireResponse.status, 200)
+    const activePortsAfterExpire = (
+      await readJson(activePortsAfterExpireResponse)
+    ).data as Array<{ id: string }>
+    assert.deepEqual(activePortsAfterExpire.map((entry) => entry.id).sort(), [
+      'postgres-1',
+      'preview-private',
+      'preview-shared',
+    ])
+
+    const expiredManagedUrlResponse = await fetch(
+      `${server.url}/ports/preview-expiring`,
+    )
+    assert.equal(expiredManagedUrlResponse.status, 410)
+  } finally {
+    await server.close()
+    await previewServer.close()
   }
 })
 
@@ -424,29 +794,52 @@ test('control plane runs approval requests through client decisions, audit loggi
 
     const approvalRequestedEvent = await eventStream.nextEvent((event) => {
       const payload = event.envelope.payload as { sessionId?: string }
-      return event.envelope.type === 'approval.requested' && payload.sessionId === 'session-approved'
+      return (
+        event.envelope.type === 'approval.requested' &&
+        payload.sessionId === 'session-approved'
+      )
     })
-    const requestedApproval = approvalRequestedEvent.envelope.payload as { id: string; sessionId: string; status: string }
+    const requestedApproval = approvalRequestedEvent.envelope.payload as {
+      id: string
+      sessionId: string
+      status: string
+    }
     assert.equal(requestedApproval.status, 'pending')
 
     const pendingApprovals = await approvalClient.listApprovals()
-    assert.equal(pendingApprovals.some((entry) => entry.id === requestedApproval.id && entry.status === 'pending'), true)
+    assert.equal(
+      pendingApprovals.some(
+        (entry) =>
+          entry.id === requestedApproval.id && entry.status === 'pending',
+      ),
+      true,
+    )
 
-    const approvedDecision = await approvalClient.decideApproval(requestedApproval.id, 'approved')
+    const approvedDecision = await approvalClient.decideApproval(
+      requestedApproval.id,
+      'approved',
+    )
     assert.equal(approvedDecision.status, 'approved')
 
     await eventStream.nextEvent((event) => {
-      const payload = event.envelope.payload as { session?: { id?: string; state?: string } }
-      return event.envelope.type === 'session.state.changed' &&
+      const payload = event.envelope.payload as {
+        session?: { id?: string; state?: string }
+      }
+      return (
+        event.envelope.type === 'session.state.changed' &&
         payload.session?.id === 'session-approved' &&
         payload.session.state === 'completed'
+      )
     })
 
-    const approvedSession = await fetch(`${server.url}/api/sessions/session-approved`, {
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const approvedSession = await fetch(
+      `${server.url}/api/sessions/session-approved`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(approvedSession.status, 200)
     const approvedSessionRecord = (await readJson(approvedSession)).data as {
       state: string
@@ -454,7 +847,11 @@ test('control plane runs approval requests through client decisions, audit loggi
     }
     assert.equal(approvedSessionRecord.state, 'completed')
     assert.equal(
-      approvedSessionRecord.logs.some((entry) => entry.message.includes('Approved privileged action "sudo apt install ripgrep".')),
+      approvedSessionRecord.logs.some((entry) =>
+        entry.message.includes(
+          'Approved privileged action "sudo apt install ripgrep".',
+        ),
+      ),
       true,
     )
 
@@ -471,25 +868,40 @@ test('control plane runs approval requests through client decisions, audit loggi
 
     const rejectionRequestedEvent = await eventStream.nextEvent((event) => {
       const payload = event.envelope.payload as { sessionId?: string }
-      return event.envelope.type === 'approval.requested' && payload.sessionId === 'session-rejected'
+      return (
+        event.envelope.type === 'approval.requested' &&
+        payload.sessionId === 'session-rejected'
+      )
     })
-    const rejectedApproval = rejectionRequestedEvent.envelope.payload as { id: string }
+    const rejectedApproval = rejectionRequestedEvent.envelope.payload as {
+      id: string
+    }
 
-    const rejectedDecision = await approvalClient.decideApproval(rejectedApproval.id, 'rejected')
+    const rejectedDecision = await approvalClient.decideApproval(
+      rejectedApproval.id,
+      'rejected',
+    )
     assert.equal(rejectedDecision.status, 'rejected')
 
     await eventStream.nextEvent((event) => {
-      const payload = event.envelope.payload as { session?: { id?: string; state?: string } }
-      return event.envelope.type === 'session.state.changed' &&
+      const payload = event.envelope.payload as {
+        session?: { id?: string; state?: string }
+      }
+      return (
+        event.envelope.type === 'session.state.changed' &&
         payload.session?.id === 'session-rejected' &&
         payload.session.state === 'failed'
+      )
     })
 
-    const rejectedSession = await fetch(`${server.url}/api/sessions/session-rejected`, {
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const rejectedSession = await fetch(
+      `${server.url}/api/sessions/session-rejected`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(rejectedSession.status, 200)
     const rejectedSessionRecord = (await readJson(rejectedSession)).data as {
       state: string
@@ -497,7 +909,11 @@ test('control plane runs approval requests through client decisions, audit loggi
     }
     assert.equal(rejectedSessionRecord.state, 'failed')
     assert.equal(
-      rejectedSessionRecord.logs.some((entry) => entry.level === 'error' && entry.message.includes('was rejected by the operator')),
+      rejectedSessionRecord.logs.some(
+        (entry) =>
+          entry.level === 'error' &&
+          entry.message.includes('was rejected by the operator'),
+      ),
       true,
     )
 
@@ -508,19 +924,39 @@ test('control plane runs approval requests through client decisions, audit loggi
       auditLog: Array<{ targetId: string; outcome: string; action: string }>
     }
     assert.equal(
-      persistedState.approvals.some((entry) => entry.id === requestedApproval.id && entry.status === 'approved' && Boolean(entry.decidedAt)),
+      persistedState.approvals.some(
+        (entry) =>
+          entry.id === requestedApproval.id &&
+          entry.status === 'approved' &&
+          Boolean(entry.decidedAt),
+      ),
       true,
     )
     assert.equal(
-      persistedState.approvals.some((entry) => entry.id === rejectedApproval.id && entry.status === 'rejected' && Boolean(entry.decidedAt)),
+      persistedState.approvals.some(
+        (entry) =>
+          entry.id === rejectedApproval.id &&
+          entry.status === 'rejected' &&
+          Boolean(entry.decidedAt),
+      ),
       true,
     )
     assert.equal(
-      persistedState.auditLog.some((entry) => entry.targetId === requestedApproval.id && entry.outcome === 'approved' && entry.action === 'approval.approved'),
+      persistedState.auditLog.some(
+        (entry) =>
+          entry.targetId === requestedApproval.id &&
+          entry.outcome === 'approved' &&
+          entry.action === 'approval.approved',
+      ),
       true,
     )
     assert.equal(
-      persistedState.auditLog.some((entry) => entry.targetId === rejectedApproval.id && entry.outcome === 'rejected' && entry.action === 'approval.rejected'),
+      persistedState.auditLog.some(
+        (entry) =>
+          entry.targetId === rejectedApproval.id &&
+          entry.outcome === 'rejected' &&
+          entry.action === 'approval.rejected',
+      ),
       true,
     )
   } finally {
@@ -582,27 +1018,39 @@ test('control plane registers git workspaces and supports list, inspect, and rem
       },
     })
     assert.equal(listedWorkspaces.status, 200)
-    assert.equal(((await readJson(listedWorkspaces)).data as unknown[]).length, 1)
+    assert.equal(
+      ((await readJson(listedWorkspaces)).data as unknown[]).length,
+      1,
+    )
 
-    const inspectedWorkspace = await fetch(`${server.url}/api/workspaces/workspace-1`, {
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const inspectedWorkspace = await fetch(
+      `${server.url}/api/workspaces/workspace-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(inspectedWorkspace.status, 200)
     assert.equal(
       ((await readJson(inspectedWorkspace)).data as { id: string }).id,
       'workspace-1',
     )
 
-    const removedWorkspace = await fetch(`${server.url}/api/workspaces/workspace-1`, {
-      method: 'DELETE',
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const removedWorkspace = await fetch(
+      `${server.url}/api/workspaces/workspace-1`,
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(removedWorkspace.status, 200)
-    assert.equal(((await readJson(removedWorkspace)).data as { id: string }).id, 'workspace-1')
+    assert.equal(
+      ((await readJson(removedWorkspace)).data as { id: string }).id,
+      'workspace-1',
+    )
 
     const emptyWorkspaces = await fetch(`${server.url}/api/workspaces`, {
       headers: {
@@ -652,7 +1100,10 @@ test('control plane rejects workspaces for missing hosts and inaccessible git pa
       }),
     })
     assert.equal(missingHost.status, 400)
-    assert.equal((await readJson(missingHost)).error, '"hostId" must reference a registered host.')
+    assert.equal(
+      (await readJson(missingHost)).error,
+      '"hostId" must reference a registered host.',
+    )
 
     const missingRepository = await fetch(`${server.url}/api/workspaces`, {
       method: 'POST',
@@ -698,7 +1149,11 @@ test('control plane delivers real-time SSE events for protected mutations', asyn
   })
 
   try {
-    const eventPromise = waitForEvent(server.url, 'operator-secret', (event) => event.envelope.type === 'notification.created')
+    const eventPromise = waitForEvent(
+      server.url,
+      'operator-secret',
+      (event) => event.envelope.type === 'notification.created',
+    )
 
     const createNotification = await fetch(`${server.url}/api/notifications`, {
       method: 'POST',
@@ -714,7 +1169,10 @@ test('control plane delivers real-time SSE events for protected mutations', asyn
 
     const event = await eventPromise
     assert.equal(event.envelope.type, 'notification.created')
-    assert.equal((event.envelope.payload as { id: string }).id, 'notification-1')
+    assert.equal(
+      (event.envelope.payload as { id: string }).id,
+      'notification-1',
+    )
   } finally {
     await server.close()
   }
@@ -756,7 +1214,9 @@ test('control plane starts managed sessions, streams runtime events, supports pa
     assert.equal(workspaceRegistration.status, 201)
 
     const firstStream = await openEventStream(server.url, 'operator-secret')
-    await firstStream.nextEvent((event) => event.envelope.type === 'session.snapshot')
+    await firstStream.nextEvent(
+      (event) => event.envelope.type === 'session.snapshot',
+    )
 
     const createSession = await fetch(`${server.url}/api/sessions`, {
       method: 'POST',
@@ -782,41 +1242,69 @@ test('control plane starts managed sessions, streams runtime events, supports pa
     assert.equal(createdSession.worktree, undefined)
 
     const runningEvent = await firstStream.nextEvent((event) => {
-      return event.envelope.type === 'session.state.changed' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'running'
+      return (
+        event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.state === 'running'
+      )
     })
     assert.equal(
-      (runningEvent.envelope.payload as { session: { state: string } }).session.state,
+      (runningEvent.envelope.payload as { session: { state: string } }).session
+        .state,
       'running',
     )
 
     const logEvent = await firstStream.nextEvent((event) => {
-      return event.envelope.type === 'session.log' &&
-        (event.envelope.payload as { sessionId: string }).sessionId === 'session-1'
-    })
-    assert.equal((logEvent.envelope.payload as { sessionId: string }).sessionId, 'session-1')
-
-    const outputEvent = await firstStream.nextEvent((event) => {
-      return event.envelope.type === 'session.output' &&
-        (event.envelope.payload as { sessionId: string }).sessionId === 'session-1'
-    })
-    assert.equal((outputEvent.envelope.payload as { sessionId: string }).sessionId, 'session-1')
-
-    const pauseSession = await fetch(`${server.url}/api/sessions/session-1/pause`, {
-      method: 'POST',
-      headers: operatorHeaders('operator-secret'),
-    })
-    assert.equal(pauseSession.status, 200)
-    assert.equal(((await readJson(pauseSession)).data as { state: string }).state, 'paused')
-
-    const pausedEvent = await firstStream.nextEvent((event) => {
-      return event.envelope.type === 'session.state.changed' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'paused'
+      return (
+        event.envelope.type === 'session.log' &&
+        (event.envelope.payload as { sessionId: string }).sessionId ===
+          'session-1'
+      )
     })
     assert.equal(
-      (pausedEvent.envelope.payload as { session: { state: string } }).session.state,
+      (logEvent.envelope.payload as { sessionId: string }).sessionId,
+      'session-1',
+    )
+
+    const outputEvent = await firstStream.nextEvent((event) => {
+      return (
+        event.envelope.type === 'session.output' &&
+        (event.envelope.payload as { sessionId: string }).sessionId ===
+          'session-1'
+      )
+    })
+    assert.equal(
+      (outputEvent.envelope.payload as { sessionId: string }).sessionId,
+      'session-1',
+    )
+
+    const pauseSession = await fetch(
+      `${server.url}/api/sessions/session-1/pause`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
+    assert.equal(pauseSession.status, 200)
+    assert.equal(
+      ((await readJson(pauseSession)).data as { state: string }).state,
+      'paused',
+    )
+
+    const pausedEvent = await firstStream.nextEvent((event) => {
+      return (
+        event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.state === 'paused'
+      )
+    })
+    assert.equal(
+      (pausedEvent.envelope.payload as { session: { state: string } }).session
+        .state,
       'paused',
     )
 
@@ -837,47 +1325,76 @@ test('control plane starts managed sessions, streams runtime events, supports pa
 
     await firstStream.close()
 
-    const resumeSession = await fetch(`${server.url}/api/sessions/session-1/resume`, {
-      method: 'POST',
-      headers: operatorHeaders('operator-secret'),
-    })
+    const resumeSession = await fetch(
+      `${server.url}/api/sessions/session-1/resume`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
     assert.equal(resumeSession.status, 200)
-    assert.equal(((await readJson(resumeSession)).data as { state: string }).state, 'running')
-
-    const replayStream = await openEventStream(server.url, 'operator-secret', pausedEvent.id)
-    const replayedRunningEvent = await replayStream.nextEvent((event) => {
-      return event.envelope.type === 'session.state.changed' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'running'
-    })
     assert.equal(
-      (replayedRunningEvent.envelope.payload as { session: { state: string } }).session.state,
+      ((await readJson(resumeSession)).data as { state: string }).state,
       'running',
     )
 
-    const cancelSession = await fetch(`${server.url}/api/sessions/session-1/cancel`, {
-      method: 'POST',
-      headers: operatorHeaders('operator-secret'),
-    })
-    assert.equal(cancelSession.status, 200)
-    assert.equal(((await readJson(cancelSession)).data as { state: string }).state, 'canceled')
-
-    const canceledEvent = await replayStream.nextEvent((event) => {
-      return event.envelope.type === 'session.state.changed' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.id === 'session-1' &&
-        (event.envelope.payload as { session: { id: string; state: string } }).session.state === 'canceled'
+    const replayStream = await openEventStream(
+      server.url,
+      'operator-secret',
+      pausedEvent.id,
+    )
+    const replayedRunningEvent = await replayStream.nextEvent((event) => {
+      return (
+        event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.state === 'running'
+      )
     })
     assert.equal(
-      (canceledEvent.envelope.payload as { session: { state: string } }).session.state,
+      (replayedRunningEvent.envelope.payload as { session: { state: string } })
+        .session.state,
+      'running',
+    )
+
+    const cancelSession = await fetch(
+      `${server.url}/api/sessions/session-1/cancel`,
+      {
+        method: 'POST',
+        headers: operatorHeaders('operator-secret'),
+      },
+    )
+    assert.equal(cancelSession.status, 200)
+    assert.equal(
+      ((await readJson(cancelSession)).data as { state: string }).state,
+      'canceled',
+    )
+
+    const canceledEvent = await replayStream.nextEvent((event) => {
+      return (
+        event.envelope.type === 'session.state.changed' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.id === 'session-1' &&
+        (event.envelope.payload as { session: { id: string; state: string } })
+          .session.state === 'canceled'
+      )
+    })
+    assert.equal(
+      (canceledEvent.envelope.payload as { session: { state: string } }).session
+        .state,
       'canceled',
     )
     await replayStream.close()
 
-    const canceledSession = await fetch(`${server.url}/api/sessions/session-1`, {
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const canceledSession = await fetch(
+      `${server.url}/api/sessions/session-1`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(canceledSession.status, 200)
     const canceledSessionState = (await readJson(canceledSession)).data as {
       state: string
@@ -927,7 +1444,11 @@ test('control plane can start sessions in isolated worktrees and rejects dirty r
     })
     assert.equal(workspaceRegistration.status, 201)
 
-    await writeFile(join(repositoryPath, 'dirty.txt'), 'pending change\n', 'utf8')
+    await writeFile(
+      join(repositoryPath, 'dirty.txt'),
+      'pending change\n',
+      'utf8',
+    )
 
     const rejectedDirtySession = await fetch(`${server.url}/api/sessions`, {
       method: 'POST',
@@ -979,17 +1500,34 @@ test('control plane can start sessions in isolated worktrees and rejects dirty r
     assert.ok(createdSession.worktree)
     assert.equal(createdSession.worktree?.path, createdSession.executionPath)
     assert.equal(createdSession.worktree?.baseBranch, 'main')
-    assert.match(createdSession.worktree?.branch ?? '', /^workspace-1-session-worktree$/)
+    assert.match(
+      createdSession.worktree?.branch ?? '',
+      /^workspace-1-session-worktree$/,
+    )
     await access(createdSession.executionPath)
 
-    const listedWorktrees = await execFileAsync('git', ['-C', repositoryPath, 'worktree', 'list', '--porcelain'])
-    assert.match(listedWorktrees.stdout, new RegExp(createdSession.executionPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    const listedWorktrees = await execFileAsync('git', [
+      '-C',
+      repositoryPath,
+      'worktree',
+      'list',
+      '--porcelain',
+    ])
+    assert.match(
+      listedWorktrees.stdout,
+      new RegExp(
+        createdSession.executionPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      ),
+    )
 
-    const persistedSession = await fetch(`${server.url}/api/sessions/session-worktree`, {
-      headers: {
-        authorization: 'Bearer operator-secret',
+    const persistedSession = await fetch(
+      `${server.url}/api/sessions/session-worktree`,
+      {
+        headers: {
+          authorization: 'Bearer operator-secret',
+        },
       },
-    })
+    )
     assert.equal(persistedSession.status, 200)
     const persisted = (await readJson(persistedSession)).data as {
       executionPath: string

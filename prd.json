@@ -192,7 +192,9 @@
         "At least private and shared visibility modes are supported",
         "The port-forwarding lifecycle has integration coverage including expiration behavior"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Extended @remote-agent-server/ports and the control plane so forwarded ports now track open, closed, and expired lifecycle state, validate registered host/workspace/session associations, and expose filtered active listings through GET /api/ports with hostId/workspaceId/sessionId filters plus includeInactive support. Added managed HTTP preview URLs at /ports/:id with shared access or operator-token protection for private forwards, plus POST /api/ports/:id/{open,close,expire} for lifecycle control and automatic expiration on later reads/access when expiresAt has passed. Documented the workflow and manual smoke commands in README.md, and added product-owned integration coverage in tests/server-control-plane.test.ts for manual HTTP and TCP forwards, workspace/session listings, managed URL access, private/shared visibility, close/reopen behavior, and expiration handling. Verified with pnpm verify."
     },
     {
       "id": "US-013",

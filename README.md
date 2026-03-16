@@ -206,6 +206,18 @@ git -C "$REPO_PATH" worktree remove --force "$WORKTREE_PATH"
 git -C "$REPO_PATH" worktree prune
 ```
 
+### Port Forwarding
+
+Operators can manually register forwarded ports through `POST /api/ports`. A forwarded port must reference a registered `hostId` and can also be scoped to a `workspaceId` or `sessionId`.
+
+- `GET /api/ports` returns active forwarded ports by default and supports `hostId`, `workspaceId`, and `sessionId` filters.
+- Add `includeInactive=true` to include closed or expired forwards in the response.
+- `POST /api/ports/<port-id>/open` reopens a forward and can optionally update `expiresAt`.
+- `POST /api/ports/<port-id>/close` closes a forward without deleting it.
+- `POST /api/ports/<port-id>/expire` forces an immediate transition to `expired`.
+
+HTTP forwards receive a managed URL at `/ports/<port-id>`. Shared forwards can be opened directly by any client with the URL. Private forwards require the operator bearer token on the managed URL request. In this MVP, the control plane proxies the configured `targetHost:port`, so that target must be reachable from the control-plane machine.
+
 ### Manual Smoke Test
 
 Start the server, then register a host with the bootstrap token, register the current checkout as a workspace, start a session, monitor it over SSE, and exercise pause, resume, cancel, and recovery with the operator token:
@@ -293,6 +305,31 @@ curl -N \
   -H 'Authorization: Bearer operator-dev-token' \
   -H 'Last-Event-ID: <event-id-from-earlier-stream>' \
   http://127.0.0.1:4318/api/events
+
+node --eval "import { createServer } from 'node:http'; createServer((_, res) => res.end('preview-ok')).listen(4173, '127.0.0.1')"
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"id":"preview-1","hostId":"host-1","workspaceId":"workspace-1","sessionId":"session-1","port":4173,"protocol":"http","visibility":"shared","label":"Preview","targetHost":"127.0.0.1"}' \
+  http://127.0.0.1:4318/api/ports
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  'http://127.0.0.1:4318/api/ports?workspaceId=workspace-1'
+
+curl -sS \
+  http://127.0.0.1:4318/ports/preview-1
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/ports/preview-1/close
+
+curl -sS -X POST \
+  -H 'Authorization: Bearer operator-dev-token' \
+  -H 'content-type: application/json' \
+  -d '{"expiresAt":"2099-01-01T00:00:00.000Z"}' \
+  http://127.0.0.1:4318/api/ports/preview-1/open
 
 curl -sS -X DELETE \
   -H 'Authorization: Bearer operator-dev-token' \

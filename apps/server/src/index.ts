@@ -1,12 +1,40 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http'
 import { execFile } from 'node:child_process'
-import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { createTokenCredential, type AuthHeaderName, type AuthPolicy, type AuthScheme } from '@remote-agent-server/auth'
-import { createManagedPort, type ManagedPort, type PortProtocol, type PortState, type PortVisibility } from '@remote-agent-server/ports'
-import { createProtocolEnvelope, createWorkspacePackageId, type ProtocolEnvelope } from '@remote-agent-server/protocol'
+import {
+  createTokenCredential,
+  type AuthHeaderName,
+  type AuthPolicy,
+  type AuthScheme,
+} from '@remote-agent-server/auth'
+import {
+  createManagedPort,
+  portForwardingStates,
+  type ManagedPort,
+  type PortForwardingState,
+  type PortProtocol,
+  type PortState,
+  type PortVisibility,
+} from '@remote-agent-server/ports'
+import {
+  createProtocolEnvelope,
+  createWorkspacePackageId,
+  type ProtocolEnvelope,
+} from '@remote-agent-server/protocol'
 import {
   createProviderApprovalDecision,
   createProviderDescriptor,
@@ -124,6 +152,8 @@ export interface ForwardedPortRecord extends ManagedPort {
   label: string
   targetHost: string
   createdAt: string
+  openedAt?: string
+  closedAt?: string
 }
 
 export interface ControlPlaneState {
@@ -180,7 +210,9 @@ export interface ControlPlaneConfig {
 
 export interface StartControlPlaneOptions extends Partial<ControlPlaneConfigFile> {
   configFile?: string
-  runtimeProviderAdapters?: RuntimeProviderAdapterRegistry | Iterable<RuntimeProviderAdapter>
+  runtimeProviderAdapters?:
+    | RuntimeProviderAdapterRegistry
+    | Iterable<RuntimeProviderAdapter>
 }
 
 export interface ControlPlaneEvent<TPayload = unknown> {
@@ -233,13 +265,17 @@ function cloneState(state: ControlPlaneState): ControlPlaneState {
 }
 
 function splitTokenList(value?: string) {
-  return value
-    ?.split(',')
-    .map((token) => token.trim())
-    .filter(Boolean) ?? []
+  return (
+    value
+      ?.split(',')
+      .map((token) => token.trim())
+      .filter(Boolean) ?? []
+  )
 }
 
-async function readConfigFile(configFile?: string): Promise<ControlPlaneConfigFile> {
+async function readConfigFile(
+  configFile?: string,
+): Promise<ControlPlaneConfigFile> {
   const configPath = configFile ?? process.env.REMOTE_AGENT_SERVER_CONFIG
 
   if (!configPath) {
@@ -250,7 +286,9 @@ async function readConfigFile(configFile?: string): Promise<ControlPlaneConfigFi
   return JSON.parse(fileContents) as ControlPlaneConfigFile
 }
 
-export async function resolveControlPlaneConfig(options: StartControlPlaneOptions = {}): Promise<ControlPlaneConfig> {
+export async function resolveControlPlaneConfig(
+  options: StartControlPlaneOptions = {},
+): Promise<ControlPlaneConfig> {
   const fileConfig = await readConfigFile(options.configFile)
   const operatorTokens = normalizeTokens([
     ...(options.operatorTokens ?? []),
@@ -264,22 +302,38 @@ export async function resolveControlPlaneConfig(options: StartControlPlaneOption
   ])
 
   if (operatorTokens.length === 0) {
-    throw new Error('Control plane configuration must provide at least one operator token.')
+    throw new Error(
+      'Control plane configuration must provide at least one operator token.',
+    )
   }
 
   if (bootstrapTokens.length === 0) {
-    throw new Error('Control plane configuration must provide at least one bootstrap token.')
+    throw new Error(
+      'Control plane configuration must provide at least one bootstrap token.',
+    )
   }
 
-  const host = options.host ?? process.env.REMOTE_AGENT_SERVER_HOST ?? fileConfig.host ?? defaultBindHost
-  const envPort = process.env.REMOTE_AGENT_SERVER_PORT ? Number(process.env.REMOTE_AGENT_SERVER_PORT) : undefined
+  const host =
+    options.host ??
+    process.env.REMOTE_AGENT_SERVER_HOST ??
+    fileConfig.host ??
+    defaultBindHost
+  const envPort = process.env.REMOTE_AGENT_SERVER_PORT
+    ? Number(process.env.REMOTE_AGENT_SERVER_PORT)
+    : undefined
   const port = options.port ?? envPort ?? fileConfig.port ?? defaultBindPort
-  const configuredDataFile = options.dataFile ?? process.env.REMOTE_AGENT_SERVER_DATA_FILE ?? fileConfig.dataFile ?? defaultDataFile
+  const configuredDataFile =
+    options.dataFile ??
+    process.env.REMOTE_AGENT_SERVER_DATA_FILE ??
+    fileConfig.dataFile ??
+    defaultDataFile
 
   return {
     host,
     port,
-    dataFile: isAbsolute(configuredDataFile) ? configuredDataFile : resolve(configuredDataFile),
+    dataFile: isAbsolute(configuredDataFile)
+      ? configuredDataFile
+      : resolve(configuredDataFile),
     operatorTokens,
     bootstrapTokens,
   }
@@ -303,7 +357,8 @@ async function loadPersistedState(dataFile: string) {
         const sessionRecord = session as Partial<SessionRecord>
         return {
           ...sessionRecord,
-          executionPath: sessionRecord.executionPath ?? sessionRecord.workspacePath ?? '',
+          executionPath:
+            sessionRecord.executionPath ?? sessionRecord.workspacePath ?? '',
           allowDirtyWorkspace: sessionRecord.allowDirtyWorkspace ?? false,
         } as SessionRecord
       }),
@@ -322,7 +377,12 @@ async function loadPersistedState(dataFile: string) {
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ENOENT'
+  )
 }
 
 async function persistState(dataFile: string, state: ControlPlaneState) {
@@ -333,7 +393,11 @@ async function persistState(dataFile: string, state: ControlPlaneState) {
   const temporaryFile = `${dataFile}.tmp`
 
   await mkdir(dirname(dataFile), { recursive: true })
-  await writeFile(temporaryFile, JSON.stringify(serializedState, null, 2), 'utf8')
+  await writeFile(
+    temporaryFile,
+    JSON.stringify(serializedState, null, 2),
+    'utf8',
+  )
   await rename(temporaryFile, dataFile)
 }
 
@@ -342,7 +406,11 @@ function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
   response.end(JSON.stringify(body))
 }
 
-function sendError(response: ServerResponse, statusCode: number, error: string) {
+function sendError(
+  response: ServerResponse,
+  statusCode: number,
+  error: string,
+) {
   sendJson(response, statusCode, { error })
 }
 
@@ -390,7 +458,9 @@ function authenticateRequest(
   request: IncomingMessage,
   config: ControlPlaneConfig,
   acceptedSchemes: readonly AuthScheme[],
-): { scheme: AuthScheme; token: string; headerName: AuthHeaderName } | undefined {
+):
+  | { scheme: AuthScheme; token: string; headerName: AuthHeaderName }
+  | undefined {
   for (const scheme of acceptedSchemes) {
     const credential = createTokenCredential(scheme, '')
     const token =
@@ -402,7 +472,10 @@ function authenticateRequest(
       continue
     }
 
-    const tokenPool = scheme === 'operator-token' ? config.operatorTokens : config.bootstrapTokens
+    const tokenPool =
+      scheme === 'operator-token'
+        ? config.operatorTokens
+        : config.bootstrapTokens
     if (tokenPool.includes(token)) {
       return {
         scheme,
@@ -421,7 +494,11 @@ function writeSseEvent(response: ServerResponse, event: ControlPlaneEvent) {
   response.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
-function createEvent(type: string, payload: unknown, origin: ProtocolEnvelope['origin'] = 'server'): ControlPlaneEvent {
+function createEvent(
+  type: string,
+  payload: unknown,
+  origin: ProtocolEnvelope['origin'] = 'server',
+): ControlPlaneEvent {
   return {
     id: randomUUID(),
     timestamp: new Date().toISOString(),
@@ -430,7 +507,9 @@ function createEvent(type: string, payload: unknown, origin: ProtocolEnvelope['o
 }
 
 function asRecord(value: unknown) {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined
 }
 
 function requireString(value: unknown, fieldName: string) {
@@ -461,13 +540,32 @@ function requireOptionalBoolean(value: unknown, fieldName: string) {
   return value
 }
 
+function requireTimestampString(value: unknown, fieldName: string) {
+  const timestamp = requireString(value, fieldName)
+  if (Number.isNaN(Date.parse(timestamp))) {
+    throw new Error(`"${fieldName}" must be a valid timestamp.`)
+  }
+
+  return timestamp
+}
+
+function requireOptionalTimestampString(value: unknown, fieldName: string) {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+
+  return requireTimestampString(value, fieldName)
+}
+
 function requireEnum<TValue extends string>(
   value: unknown,
   fieldName: string,
   allowedValues: readonly TValue[],
 ): TValue {
   if (typeof value !== 'string' || !allowedValues.includes(value as TValue)) {
-    throw new Error(`"${fieldName}" must be one of: ${allowedValues.join(', ')}.`)
+    throw new Error(
+      `"${fieldName}" must be one of: ${allowedValues.join(', ')}.`,
+    )
   }
 
   return value as TValue
@@ -486,11 +584,24 @@ function requireHostRecord(body: unknown): HostRecord {
     name: requireString(record.name, 'name'),
     platform: requireString(record.platform, 'platform'),
     runtimeVersion: requireString(record.runtimeVersion, 'runtimeVersion'),
-    status: requireEnum(record.status ?? 'online', 'status', ['online', 'offline']),
-    health: requireEnum(record.health ?? 'healthy', 'health', ['healthy', 'degraded', 'unhealthy']),
-    connectivity: requireEnum(record.connectivity ?? 'connected', 'connectivity', ['connected', 'disconnected']),
-    registeredAt: typeof record.registeredAt === 'string' ? record.registeredAt : timestamp,
-    lastSeenAt: typeof record.lastSeenAt === 'string' ? record.lastSeenAt : timestamp,
+    status: requireEnum(record.status ?? 'online', 'status', [
+      'online',
+      'offline',
+    ]),
+    health: requireEnum(record.health ?? 'healthy', 'health', [
+      'healthy',
+      'degraded',
+      'unhealthy',
+    ]),
+    connectivity: requireEnum(
+      record.connectivity ?? 'connected',
+      'connectivity',
+      ['connected', 'disconnected'],
+    ),
+    registeredAt:
+      typeof record.registeredAt === 'string' ? record.registeredAt : timestamp,
+    lastSeenAt:
+      typeof record.lastSeenAt === 'string' ? record.lastSeenAt : timestamp,
   }
 }
 
@@ -499,33 +610,53 @@ async function resolveGitRepository(path: string) {
     await access(path)
   } catch (error) {
     if (isMissingFileError(error)) {
-      throw new Error(`Repository path "${path}" does not exist or is not accessible.`)
+      throw new Error(
+        `Repository path "${path}" does not exist or is not accessible.`,
+      )
     }
 
     throw new Error(`Repository path "${path}" is not accessible.`)
   }
 
   try {
-    const { stdout } = await execFileAsync('git', ['-C', path, 'rev-parse', '--show-toplevel'])
+    const { stdout } = await execFileAsync('git', [
+      '-C',
+      path,
+      'rev-parse',
+      '--show-toplevel',
+    ])
     return stdout.trim()
   } catch {
-    throw new Error(`Repository path "${path}" is not an accessible git repository.`)
+    throw new Error(
+      `Repository path "${path}" is not an accessible git repository.`,
+    )
   }
 }
 
-async function runGitCommand(path: string, args: string[], maxBuffer = gitCommandMaxBuffer) {
+async function runGitCommand(
+  path: string,
+  args: string[],
+  maxBuffer = gitCommandMaxBuffer,
+) {
   return await execFileAsync('git', ['-C', path, ...args], { maxBuffer })
 }
 
 async function listGitStatusEntries(path: string) {
-  const { stdout } = await runGitCommand(path, ['status', '--porcelain', '--untracked-files=normal'])
+  const { stdout } = await runGitCommand(path, [
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ])
   return stdout
     .split('\n')
     .map((line) => line.trimEnd())
     .filter(Boolean)
 }
 
-async function assertCleanGitCheckout(path: string, allowDirtyWorkspace: boolean) {
+async function assertCleanGitCheckout(
+  path: string,
+  allowDirtyWorkspace: boolean,
+) {
   if (allowDirtyWorkspace) {
     return
   }
@@ -535,7 +666,9 @@ async function assertCleanGitCheckout(path: string, allowDirtyWorkspace: boolean
     return
   }
 
-  throw new Error(`Workspace path "${path}" has uncommitted changes. Set "allowDirtyWorkspace" to true to run anyway.`)
+  throw new Error(
+    `Workspace path "${path}" has uncommitted changes. Set "allowDirtyWorkspace" to true to run anyway.`,
+  )
 }
 
 async function hasCommittedHead(path: string) {
@@ -548,11 +681,20 @@ async function hasCommittedHead(path: string) {
 }
 
 async function resolveWorktreeBaseRef(path: string, defaultBranch: string) {
-  const candidateRefs = [`refs/heads/${defaultBranch}`, `refs/remotes/origin/${defaultBranch}`, 'HEAD']
+  const candidateRefs = [
+    `refs/heads/${defaultBranch}`,
+    `refs/remotes/origin/${defaultBranch}`,
+    'HEAD',
+  ]
 
   for (const candidateRef of candidateRefs) {
     try {
-      const { stdout } = await runGitCommand(path, ['rev-parse', '--verify', '--quiet', candidateRef])
+      const { stdout } = await runGitCommand(path, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        candidateRef,
+      ])
       if (stdout.trim().length > 0) {
         return candidateRef
       }
@@ -561,7 +703,9 @@ async function resolveWorktreeBaseRef(path: string, defaultBranch: string) {
     }
   }
 
-  throw new Error(`Repository path "${path}" could not resolve a base ref for worktree creation.`)
+  throw new Error(
+    `Repository path "${path}" could not resolve a base ref for worktree creation.`,
+  )
 }
 
 function sanitizeGitRefComponent(value: string) {
@@ -573,18 +717,32 @@ function sanitizeGitRefComponent(value: string) {
   return sanitized.length > 0 ? sanitized : 'session'
 }
 
-function createSessionWorktreeBranchName(workspaceId: string, sessionId: string) {
+function createSessionWorktreeBranchName(
+  workspaceId: string,
+  sessionId: string,
+) {
   return `${sanitizeGitRefComponent(workspaceId)}-${sanitizeGitRefComponent(sessionId)}`
 }
 
-function createSessionWorktreePath(workspace: WorkspaceRecord, branchName: string) {
-  return join(dirname(workspace.path), '.remote-agent-server-worktrees', workspace.id, branchName)
+function createSessionWorktreePath(
+  workspace: WorkspaceRecord,
+  branchName: string,
+) {
+  return join(
+    dirname(workspace.path),
+    '.remote-agent-server-worktrees',
+    workspace.id,
+    branchName,
+  )
 }
 
 async function prepareSessionExecutionTarget(
   request: SessionStartRequest,
 ): Promise<SessionExecutionTarget> {
-  await assertCleanGitCheckout(request.workspace.path, request.allowDirtyWorkspace)
+  await assertCleanGitCheckout(
+    request.workspace.path,
+    request.allowDirtyWorkspace,
+  )
 
   if (request.descriptor.mode === 'workspace') {
     return {
@@ -592,17 +750,35 @@ async function prepareSessionExecutionTarget(
     }
   }
 
-  const branchName = createSessionWorktreeBranchName(request.workspace.id, request.descriptor.id)
+  const branchName = createSessionWorktreeBranchName(
+    request.workspace.id,
+    request.descriptor.id,
+  )
   const worktreePath = createSessionWorktreePath(request.workspace, branchName)
   const createdAt = new Date().toISOString()
 
   await mkdir(dirname(worktreePath), { recursive: true })
 
   if (await hasCommittedHead(request.workspace.path)) {
-    const baseRef = await resolveWorktreeBaseRef(request.workspace.path, request.workspace.defaultBranch)
-    await runGitCommand(request.workspace.path, ['worktree', 'add', '-b', branchName, worktreePath, baseRef])
+    const baseRef = await resolveWorktreeBaseRef(
+      request.workspace.path,
+      request.workspace.defaultBranch,
+    )
+    await runGitCommand(request.workspace.path, [
+      'worktree',
+      'add',
+      '-b',
+      branchName,
+      worktreePath,
+      baseRef,
+    ])
   } else {
-    await runGitCommand(request.workspace.path, ['worktree', 'add', '--orphan', worktreePath])
+    await runGitCommand(request.workspace.path, [
+      'worktree',
+      'add',
+      '--orphan',
+      worktreePath,
+    ])
   }
 
   return {
@@ -618,7 +794,14 @@ async function prepareSessionExecutionTarget(
 
 async function detectDefaultBranch(path: string) {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', path, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+    const { stdout } = await execFileAsync('git', [
+      '-C',
+      path,
+      'symbolic-ref',
+      '--quiet',
+      '--short',
+      'refs/remotes/origin/HEAD',
+    ])
     const remoteBranch = stdout.trim()
 
     if (remoteBranch.length > 0) {
@@ -629,7 +812,14 @@ async function detectDefaultBranch(path: string) {
   }
 
   try {
-    const { stdout } = await execFileAsync('git', ['-C', path, 'symbolic-ref', '--quiet', '--short', 'HEAD'])
+    const { stdout } = await execFileAsync('git', [
+      '-C',
+      path,
+      'symbolic-ref',
+      '--quiet',
+      '--short',
+      'HEAD',
+    ])
     const branch = stdout.trim()
 
     if (branch.length > 0) {
@@ -639,10 +829,15 @@ async function detectDefaultBranch(path: string) {
     // Surface a clearer error below.
   }
 
-  throw new Error(`Repository path "${path}" does not expose a default branch. Provide "defaultBranch" explicitly.`)
+  throw new Error(
+    `Repository path "${path}" does not expose a default branch. Provide "defaultBranch" explicitly.`,
+  )
 }
 
-function classifySessionChange(indexStatus: string, workingTreeStatus: string): SessionChangeKind {
+function classifySessionChange(
+  indexStatus: string,
+  workingTreeStatus: string,
+): SessionChangeKind {
   if (indexStatus === 'R' || workingTreeStatus === 'R') {
     return 'renamed'
   }
@@ -651,7 +846,11 @@ function classifySessionChange(indexStatus: string, workingTreeStatus: string): 
     return 'removed'
   }
 
-  if (indexStatus === 'A' || workingTreeStatus === 'A' || workingTreeStatus === '?') {
+  if (
+    indexStatus === 'A' ||
+    workingTreeStatus === 'A' ||
+    workingTreeStatus === '?'
+  ) {
     return 'added'
   }
 
@@ -725,28 +924,59 @@ function parseGitNameStatusEntries(output: string) {
 
 async function listDetectedRenames(path: string) {
   if (await hasCommittedHead(path)) {
-    const { stdout } = await runGitCommand(path, ['diff', '--find-renames', '--name-status', '-z', 'HEAD'])
+    const { stdout } = await runGitCommand(path, [
+      'diff',
+      '--find-renames',
+      '--name-status',
+      '-z',
+      'HEAD',
+    ])
     return parseGitNameStatusEntries(stdout)
   }
 
-  const staged = await runGitCommand(path, ['diff', '--cached', '--find-renames', '--name-status', '-z', '--root'])
-  const unstaged = await runGitCommand(path, ['diff', '--find-renames', '--name-status', '-z'])
-  return [...parseGitNameStatusEntries(staged.stdout), ...parseGitNameStatusEntries(unstaged.stdout)]
+  const staged = await runGitCommand(path, [
+    'diff',
+    '--cached',
+    '--find-renames',
+    '--name-status',
+    '-z',
+    '--root',
+  ])
+  const unstaged = await runGitCommand(path, [
+    'diff',
+    '--find-renames',
+    '--name-status',
+    '-z',
+  ])
+  return [
+    ...parseGitNameStatusEntries(staged.stdout),
+    ...parseGitNameStatusEntries(unstaged.stdout),
+  ]
 }
 
-function mergeDetectedRenames(files: SessionChangedFile[], renames: DetectedRename[]) {
+function mergeDetectedRenames(
+  files: SessionChangedFile[],
+  renames: DetectedRename[],
+) {
   const mergedFiles = [...files]
 
   for (const rename of renames) {
     const existingRenameIndex = mergedFiles.findIndex(
-      (file) => file.path === rename.path && file.previousPath === rename.previousPath && file.kind === 'renamed',
+      (file) =>
+        file.path === rename.path &&
+        file.previousPath === rename.previousPath &&
+        file.kind === 'renamed',
     )
     if (existingRenameIndex !== -1) {
       continue
     }
 
-    const removedIndex = mergedFiles.findIndex((file) => file.path === rename.previousPath && file.kind === 'removed')
-    const addedIndex = mergedFiles.findIndex((file) => file.path === rename.path && file.kind === 'added')
+    const removedIndex = mergedFiles.findIndex(
+      (file) => file.path === rename.previousPath && file.kind === 'removed',
+    )
+    const addedIndex = mergedFiles.findIndex(
+      (file) => file.path === rename.path && file.kind === 'added',
+    )
     const addedFile = addedIndex === -1 ? undefined : mergedFiles[addedIndex]
 
     const renamedFile: SessionChangedFile = {
@@ -763,7 +993,9 @@ function mergeDetectedRenames(files: SessionChangedFile[], renames: DetectedRena
       mergedFiles.splice(removedIndex, 1)
     }
 
-    const adjustedAddedIndex = mergedFiles.findIndex((file) => file.path === rename.path && file.kind === 'added')
+    const adjustedAddedIndex = mergedFiles.findIndex(
+      (file) => file.path === rename.path && file.kind === 'added',
+    )
     if (adjustedAddedIndex !== -1) {
       mergedFiles.splice(adjustedAddedIndex, 1, renamedFile)
     } else {
@@ -775,7 +1007,12 @@ function mergeDetectedRenames(files: SessionChangedFile[], renames: DetectedRena
 }
 
 async function listSessionChangedFiles(path: string) {
-  const { stdout } = await runGitCommand(path, ['status', '--porcelain=1', '-z', '--find-renames'])
+  const { stdout } = await runGitCommand(path, [
+    'status',
+    '--porcelain=1',
+    '-z',
+    '--find-renames',
+  ])
   const files = parseGitStatusEntries(stdout)
   const renames = await listDetectedRenames(path)
   return mergeDetectedRenames(files, renames)
@@ -790,11 +1027,8 @@ function createPatchSummary(files: SessionChangedFile[]) {
       continue
     }
 
-    const prefix = file.kind === 'added'
-      ? 'A'
-      : file.kind === 'removed'
-        ? 'D'
-        : 'M'
+    const prefix =
+      file.kind === 'added' ? 'A' : file.kind === 'removed' ? 'D' : 'M'
     lines.push(`${prefix} ${file.path}`)
   }
 
@@ -806,7 +1040,13 @@ function createPatchSummary(files: SessionChangedFile[]) {
 
 async function readUntrackedFileDiff(path: string, filePath: string) {
   try {
-    const { stdout } = await runGitCommand(path, ['diff', '--no-index', '--', '/dev/null', filePath])
+    const { stdout } = await runGitCommand(path, [
+      'diff',
+      '--no-index',
+      '--',
+      '/dev/null',
+      filePath,
+    ])
     return stdout
   } catch (error) {
     const candidate = error as { stdout?: string }
@@ -822,18 +1062,40 @@ async function createTrackedDiffText(path: string, filePaths?: string[]) {
   const pathArgs = filePaths && filePaths.length > 0 ? ['--', ...filePaths] : []
 
   if (await hasCommittedHead(path)) {
-    const { stdout } = await runGitCommand(path, ['diff', '--find-renames', 'HEAD', ...pathArgs])
+    const { stdout } = await runGitCommand(path, [
+      'diff',
+      '--find-renames',
+      'HEAD',
+      ...pathArgs,
+    ])
     return stdout
   }
 
-  const staged = await runGitCommand(path, ['diff', '--cached', '--find-renames', '--root', ...pathArgs])
-  const unstaged = await runGitCommand(path, ['diff', '--find-renames', ...pathArgs])
+  const staged = await runGitCommand(path, [
+    'diff',
+    '--cached',
+    '--find-renames',
+    '--root',
+    ...pathArgs,
+  ])
+  const unstaged = await runGitCommand(path, [
+    'diff',
+    '--find-renames',
+    ...pathArgs,
+  ])
   return `${staged.stdout}${unstaged.stdout}`
 }
 
-async function createSessionDiffText(path: string, files: SessionChangedFile[], requestedPath?: string) {
+async function createSessionDiffText(
+  path: string,
+  files: SessionChangedFile[],
+  requestedPath?: string,
+) {
   const selectedFiles = requestedPath
-    ? files.filter((file) => file.path === requestedPath || file.previousPath === requestedPath)
+    ? files.filter(
+        (file) =>
+          file.path === requestedPath || file.previousPath === requestedPath,
+      )
     : files
 
   if (selectedFiles.length === 0) {
@@ -870,7 +1132,13 @@ async function createSessionDiffText(path: string, files: SessionChangedFile[], 
   return diffSections.join('').trimEnd()
 }
 
-function paginateDiffText(sessionId: string, text: string, page: number, pageSize: number, path?: string): SessionDiffPage {
+function paginateDiffText(
+  sessionId: string,
+  text: string,
+  page: number,
+  pageSize: number,
+  path?: string,
+): SessionDiffPage {
   const totalLines = text.length === 0 ? 0 : text.split('\n').length
   const totalPages = Math.max(1, Math.ceil(totalLines / pageSize))
   const safePage = Math.min(Math.max(page, 1), totalPages)
@@ -892,7 +1160,11 @@ function paginateDiffText(sessionId: string, text: string, page: number, pageSiz
   }
 }
 
-function requirePositiveInteger(value: string | null, fieldName: string, fallback: number) {
+function requirePositiveInteger(
+  value: string | null,
+  fieldName: string,
+  fallback: number,
+) {
   if (value === null || value.trim().length === 0) {
     return fallback
   }
@@ -905,7 +1177,9 @@ function requirePositiveInteger(value: string | null, fieldName: string, fallbac
   return parsed
 }
 
-async function getSessionChangeSet(session: SessionRecord): Promise<SessionChangeSet> {
+async function getSessionChangeSet(
+  session: SessionRecord,
+): Promise<SessionChangeSet> {
   const files = await listSessionChangedFiles(session.executionPath)
   return {
     sessionId: session.id,
@@ -916,28 +1190,87 @@ async function getSessionChangeSet(session: SessionRecord): Promise<SessionChang
   }
 }
 
-function requireRegisteredHost(state: ControlPlaneState, hostId: string, fieldName: string) {
+function requireRegisteredHost(
+  state: ControlPlaneState,
+  hostId: string,
+  fieldName: string,
+) {
   if (!state.hosts.some((host) => host.id === hostId)) {
     throw new Error(`"${fieldName}" must reference a registered host.`)
   }
 }
 
-async function requireWorkspaceRecord(body: unknown, state: ControlPlaneState): Promise<WorkspaceRecord> {
+function createForwardedPortManagedUrl(baseUrl: string, portId: string) {
+  return `${baseUrl}/ports/${encodeURIComponent(portId)}`
+}
+
+function normalizeForwardedPortRecord(
+  record: ForwardedPortRecord,
+  baseUrl: string,
+): ForwardedPortRecord {
+  const normalizedState =
+    record.forwardingState ??
+    (record.state === 'forwarded' ? 'open' : undefined)
+
+  return {
+    ...record,
+    forwardingState: normalizedState,
+    managedUrl:
+      record.state === 'forwarded' && record.protocol === 'http'
+        ? createForwardedPortManagedUrl(baseUrl, record.id)
+        : undefined,
+  }
+}
+
+function shouldExpireForwardedPort(
+  record: ForwardedPortRecord,
+  now = Date.now(),
+) {
+  return (
+    record.state === 'forwarded' &&
+    record.forwardingState === 'open' &&
+    typeof record.expiresAt === 'string' &&
+    Date.parse(record.expiresAt) <= now
+  )
+}
+
+function markForwardedPortExpired(
+  record: ForwardedPortRecord,
+  timestamp: string,
+): ForwardedPortRecord {
+  return {
+    ...record,
+    forwardingState: 'expired',
+    closedAt: record.closedAt ?? timestamp,
+    expiredAt: record.expiredAt ?? timestamp,
+  }
+}
+
+async function requireWorkspaceRecord(
+  body: unknown,
+  state: ControlPlaneState,
+): Promise<WorkspaceRecord> {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
   }
 
   const hostId = requireString(record.hostId, 'hostId')
-  const runtimeHostId = requireString(record.runtimeHostId ?? record.hostId, 'runtimeHostId')
+  const runtimeHostId = requireString(
+    record.runtimeHostId ?? record.hostId,
+    'runtimeHostId',
+  )
   requireRegisteredHost(state, hostId, 'hostId')
   requireRegisteredHost(state, runtimeHostId, 'runtimeHostId')
 
   const repositoryPath = requireString(record.path, 'path')
-  const resolvedRepositoryPath = isAbsolute(repositoryPath) ? repositoryPath : resolve(repositoryPath)
+  const resolvedRepositoryPath = isAbsolute(repositoryPath)
+    ? repositoryPath
+    : resolve(repositoryPath)
   const gitRepositoryPath = await resolveGitRepository(resolvedRepositoryPath)
   const defaultBranch =
-    typeof record.defaultBranch === 'string' && record.defaultBranch.trim().length > 0
+    typeof record.defaultBranch === 'string' &&
+    record.defaultBranch.trim().length > 0
       ? requireString(record.defaultBranch, 'defaultBranch')
       : await detectDefaultBranch(gitRepositoryPath)
 
@@ -947,15 +1280,25 @@ async function requireWorkspaceRecord(body: unknown, state: ControlPlaneState): 
     path: gitRepositoryPath,
     defaultBranch,
     runtimeHostId,
-    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+    createdAt:
+      typeof record.createdAt === 'string'
+        ? record.createdAt
+        : new Date().toISOString(),
   }
 }
 
 function requireProviderKind(value: unknown, fieldName: string) {
-  return requireEnum(value, fieldName, providerKinds satisfies readonly ProviderKind[])
+  return requireEnum(
+    value,
+    fieldName,
+    providerKinds satisfies readonly ProviderKind[],
+  )
 }
 
-function requireSessionStartRequest(body: unknown, state: ControlPlaneState): SessionStartRequest {
+function requireSessionStartRequest(
+  body: unknown,
+  state: ControlPlaneState,
+): SessionStartRequest {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
@@ -981,19 +1324,30 @@ function requireSessionStartRequest(body: unknown, state: ControlPlaneState): Se
       'failed',
       'canceled',
     ] satisfies readonly SessionState[]),
-    mode: requireEnum(record.mode ?? 'workspace', 'mode', ['workspace', 'worktree'] satisfies readonly SessionMode[]),
+    mode: requireEnum(record.mode ?? 'workspace', 'mode', [
+      'workspace',
+      'worktree',
+    ] satisfies readonly SessionMode[]),
   })
 
   return {
     descriptor,
     workspace,
-    allowDirtyWorkspace: requireOptionalBoolean(record.allowDirtyWorkspace, 'allowDirtyWorkspace') ?? false,
-    createdAt: typeof record.createdAt === 'string' ? record.createdAt : timestamp,
-    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
+    allowDirtyWorkspace:
+      requireOptionalBoolean(
+        record.allowDirtyWorkspace,
+        'allowDirtyWorkspace',
+      ) ?? false,
+    createdAt:
+      typeof record.createdAt === 'string' ? record.createdAt : timestamp,
+    updatedAt:
+      typeof record.updatedAt === 'string' ? record.updatedAt : timestamp,
     startedAt: requireOptionalString(record.startedAt, 'startedAt'),
     completedAt: requireOptionalString(record.completedAt, 'completedAt'),
     logs: Array.isArray(record.logs) ? (record.logs as SessionLogEntry[]) : [],
-    output: Array.isArray(record.output) ? (record.output as SessionOutputEntry[]) : [],
+    output: Array.isArray(record.output)
+      ? (record.output as SessionOutputEntry[])
+      : [],
   }
 }
 
@@ -1010,7 +1364,11 @@ function requireSession(state: ControlPlaneState, sessionId: string) {
   return session
 }
 
-function updateSession(state: ControlPlaneState, sessionId: string, update: SessionMutableFields) {
+function updateSession(
+  state: ControlPlaneState,
+  sessionId: string,
+  update: SessionMutableFields,
+) {
   const index = state.sessions.findIndex((entry) => entry.id === sessionId)
   if (index === -1) {
     throw new Error(`Session "${sessionId}" was not found.`)
@@ -1042,8 +1400,15 @@ function requireApprovalRecord(body: unknown): ApprovalRecord {
       typeof record.message === 'string' && record.message.trim().length > 0
         ? requireString(record.message, 'message')
         : `Approval required for privileged action "${requireString(record.action, 'action')}".`,
-    status: requireEnum(record.status ?? 'pending', 'status', providerApprovalStatuses),
-    requestedAt: typeof record.requestedAt === 'string' ? record.requestedAt : new Date().toISOString(),
+    status: requireEnum(
+      record.status ?? 'pending',
+      'status',
+      providerApprovalStatuses,
+    ),
+    requestedAt:
+      typeof record.requestedAt === 'string'
+        ? record.requestedAt
+        : new Date().toISOString(),
     decidedAt: requireOptionalString(record.decidedAt, 'decidedAt'),
   }
 }
@@ -1056,48 +1421,151 @@ function requireNotificationRecord(body: unknown): NotificationRecord {
 
   return {
     id: requireString(record.id ?? `notification-${randomUUID()}`, 'id'),
-    level: requireEnum(record.level ?? 'info', 'level', ['info', 'warning', 'error']),
+    level: requireEnum(record.level ?? 'info', 'level', [
+      'info',
+      'warning',
+      'error',
+    ]),
     message: requireString(record.message, 'message'),
     sessionId: requireOptionalString(record.sessionId, 'sessionId'),
-    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+    createdAt:
+      typeof record.createdAt === 'string'
+        ? record.createdAt
+        : new Date().toISOString(),
   }
 }
 
-function requireForwardedPortRecord(body: unknown): ForwardedPortRecord {
+function requireForwardedPortRecord(
+  body: unknown,
+  state: ControlPlaneState,
+  baseUrl: string,
+): ForwardedPortRecord {
   const record = asRecord(body)
   if (!record) {
     throw new Error('Request body must be a JSON object.')
   }
 
-  return {
-    ...createManagedPort({
-      id: requireString(record.id ?? `port-${randomUUID()}`, 'id'),
-      port: requireValidPort(record.port),
-      protocol: requireEnum(record.protocol ?? 'http', 'protocol', ['http', 'tcp'] satisfies readonly PortProtocol[]),
-      visibility: requireEnum(record.visibility ?? 'private', 'visibility', [
-        'private',
-        'shared',
-      ] satisfies readonly PortVisibility[]),
-      state: requireEnum(record.state ?? 'forwarded', 'state', ['detected', 'forwarded'] satisfies readonly PortState[]),
-    }),
-    hostId: requireString(record.hostId, 'hostId'),
-    workspaceId: requireOptionalString(record.workspaceId, 'workspaceId'),
-    sessionId: requireOptionalString(record.sessionId, 'sessionId'),
-    label: requireString(record.label, 'label'),
-    targetHost: requireString(record.targetHost ?? '127.0.0.1', 'targetHost'),
-    createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
+  const id = requireString(record.id ?? `port-${randomUUID()}`, 'id')
+  const hostId = requireString(record.hostId, 'hostId')
+  const protocol = requireEnum(record.protocol ?? 'http', 'protocol', [
+    'http',
+    'tcp',
+  ] satisfies readonly PortProtocol[])
+  const stateValue = requireEnum(record.state ?? 'forwarded', 'state', [
+    'detected',
+    'forwarded',
+  ] satisfies readonly PortState[])
+  let workspaceId = requireOptionalString(record.workspaceId, 'workspaceId')
+  const sessionId = requireOptionalString(record.sessionId, 'sessionId')
+
+  requireRegisteredHost(state, hostId, 'hostId')
+
+  if (workspaceId) {
+    const workspace = state.workspaces.find((entry) => entry.id === workspaceId)
+    if (!workspace) {
+      throw new Error(`Workspace "${workspaceId}" was not found.`)
+    }
+
+    if (workspace.hostId !== hostId) {
+      throw new Error(
+        `Workspace "${workspaceId}" does not belong to host "${hostId}".`,
+      )
+    }
   }
+
+  if (sessionId) {
+    const session = findSession(state, sessionId)
+    if (!session) {
+      throw new Error(`Session "${sessionId}" was not found.`)
+    }
+
+    if (session.hostId !== hostId) {
+      throw new Error(
+        `Session "${sessionId}" does not belong to host "${hostId}".`,
+      )
+    }
+
+    workspaceId ??= session.workspaceId
+
+    if (workspaceId && session.workspaceId !== workspaceId) {
+      throw new Error(
+        `Session "${sessionId}" does not belong to workspace "${workspaceId}".`,
+      )
+    }
+  }
+
+  const createdAt =
+    typeof record.createdAt === 'string'
+      ? requireTimestampString(record.createdAt, 'createdAt')
+      : new Date().toISOString()
+  const forwardingState =
+    stateValue === 'forwarded'
+      ? requireEnum(
+          record.forwardingState ?? 'open',
+          'forwardingState',
+          portForwardingStates satisfies readonly PortForwardingState[],
+        )
+      : undefined
+  const openedAt =
+    stateValue === 'forwarded' && forwardingState === 'open'
+      ? (requireOptionalTimestampString(record.openedAt, 'openedAt') ??
+        createdAt)
+      : requireOptionalTimestampString(record.openedAt, 'openedAt')
+  const closedAt = requireOptionalTimestampString(record.closedAt, 'closedAt')
+  const expiresAt = requireOptionalTimestampString(
+    record.expiresAt,
+    'expiresAt',
+  )
+  const expiredAt = requireOptionalTimestampString(
+    record.expiredAt,
+    'expiredAt',
+  )
+
+  return normalizeForwardedPortRecord(
+    {
+      ...createManagedPort({
+        id,
+        port: requireValidPort(record.port),
+        protocol,
+        visibility: requireEnum(record.visibility ?? 'private', 'visibility', [
+          'private',
+          'shared',
+        ] satisfies readonly PortVisibility[]),
+        state: stateValue,
+        forwardingState,
+        expiresAt,
+        expiredAt,
+      }),
+      hostId,
+      workspaceId,
+      sessionId,
+      label: requireString(record.label, 'label'),
+      targetHost: requireString(record.targetHost ?? '127.0.0.1', 'targetHost'),
+      createdAt,
+      openedAt,
+      closedAt,
+    },
+    baseUrl,
+  )
 }
 
 function requireValidPort(value: unknown) {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 65535
+  ) {
     throw new Error('"port" must be an integer between 1 and 65535.')
   }
 
   return value
 }
 
-function upsertRecord<TRecord extends { id: string }>(collection: TRecord[], record: TRecord) {
+function upsertRecord<TRecord extends { id: string }>(
+  collection: TRecord[],
+  record: TRecord,
+) {
   const index = collection.findIndex((item) => item.id === record.id)
   if (index === -1) {
     collection.push(record)
@@ -1106,7 +1574,10 @@ function upsertRecord<TRecord extends { id: string }>(collection: TRecord[], rec
   }
 }
 
-function removeRecordById<TRecord extends { id: string }>(collection: TRecord[], id: string) {
+function removeRecordById<TRecord extends { id: string }>(
+  collection: TRecord[],
+  id: string,
+) {
   const index = collection.findIndex((item) => item.id === id)
   if (index === -1) {
     return undefined
@@ -1120,7 +1591,9 @@ function notFound(response: ServerResponse) {
   sendError(response, 404, 'Not found.')
 }
 
-export async function startControlPlaneServer(options: StartControlPlaneOptions = {}): Promise<ControlPlaneServerHandle> {
+export async function startControlPlaneServer(
+  options: StartControlPlaneOptions = {},
+): Promise<ControlPlaneServerHandle> {
   const config = await resolveControlPlaneConfig(options)
   const state = await loadPersistedState(config.dataFile)
   const runtime = createRuntimeManifest('remote-control-plane-runtime')
@@ -1136,6 +1609,7 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
   >()
   const eventBacklog: ControlPlaneEvent[] = []
   let persistSequence = Promise.resolve()
+  let publicBaseUrl = ''
   const maxEventBacklog = 250
 
   function persistCurrentState() {
@@ -1165,8 +1639,16 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     origin: ProtocolEnvelope['origin'] = 'server',
   ) {
     const collection = state[collectionName] as TRecord[]
-    if (Array.isArray(collection) && record && typeof record === 'object' && 'id' in (record as Record<string, unknown>)) {
-      upsertRecord(collection as Array<{ id: string }>, record as { id: string } & TRecord)
+    if (
+      Array.isArray(collection) &&
+      record &&
+      typeof record === 'object' &&
+      'id' in (record as Record<string, unknown>)
+    ) {
+      upsertRecord(
+        collection as Array<{ id: string }>,
+        record as { id: string } & TRecord,
+      )
     } else {
       collection.push(record)
     }
@@ -1201,16 +1683,79 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     await persistCurrentState()
   }
 
-  function createApprovalAuditLogEntry(approval: ApprovalRecord): AuditLogEntry {
+  function getForwardedPortSnapshot(record: ForwardedPortRecord) {
+    return normalizeForwardedPortRecord(record, publicBaseUrl)
+  }
+
+  function findForwardedPort(portId: string) {
+    const record = state.forwardedPorts.find((entry) => entry.id === portId)
+    return record ? getForwardedPortSnapshot(record) : undefined
+  }
+
+  function requireForwardedPort(portId: string) {
+    const record = findForwardedPort(portId)
+    if (!record) {
+      throw new Error(`Port "${portId}" was not found.`)
+    }
+
+    return record
+  }
+
+  async function expireForwardedPorts(portIds?: string[]) {
+    const now = Date.now()
+    const timestamp = new Date(now).toISOString()
+    const expiredRecords: ForwardedPortRecord[] = []
+
+    for (let index = 0; index < state.forwardedPorts.length; index += 1) {
+      const current = getForwardedPortSnapshot(state.forwardedPorts[index])
+
+      if (portIds && !portIds.includes(current.id)) {
+        continue
+      }
+
+      if (!shouldExpireForwardedPort(current, now)) {
+        if (state.forwardedPorts[index] !== current) {
+          state.forwardedPorts[index] = current
+        }
+        continue
+      }
+
+      const expired = getForwardedPortSnapshot(
+        markForwardedPortExpired(current, timestamp),
+      )
+      state.forwardedPorts[index] = expired
+      expiredRecords.push(expired)
+    }
+
+    if (expiredRecords.length === 0) {
+      return []
+    }
+
+    await persistCurrentState()
+    for (const expiredRecord of expiredRecords) {
+      broadcastEvent(createEvent('port.expired', expiredRecord))
+    }
+
+    return expiredRecords
+  }
+
+  function createApprovalAuditLogEntry(
+    approval: ApprovalRecord,
+  ): AuditLogEntry {
     if (approval.status === 'pending' || !approval.decidedAt) {
-      throw new Error(`Approval "${approval.id}" cannot be written to the audit log before it is decided.`)
+      throw new Error(
+        `Approval "${approval.id}" cannot be written to the audit log before it is decided.`,
+      )
     }
 
     return {
       id: `audit-${randomUUID()}`,
       timestamp: approval.decidedAt,
       actor: 'operator',
-      action: approval.status === 'approved' ? 'approval.approved' : 'approval.rejected',
+      action:
+        approval.status === 'approved'
+          ? 'approval.approved'
+          : 'approval.rejected',
       targetType: 'approval',
       targetId: approval.id,
       sessionId: approval.sessionId,
@@ -1219,7 +1764,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     }
   }
 
-  async function requestSessionApproval(request: ProviderApprovalRequest): Promise<ProviderApprovalDecision> {
+  async function requestSessionApproval(
+    request: ProviderApprovalRequest,
+  ): Promise<ProviderApprovalDecision> {
     if (pendingApprovalDecisions.has(request.id)) {
       throw new Error(`Approval "${request.id}" is already pending.`)
     }
@@ -1265,7 +1812,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     sendJson(response, statusCode, { data: record })
   }
 
-  async function persistSessionSnapshot(snapshot: ReturnType<RuntimeSessionHandle['getSnapshot']>) {
+  async function persistSessionSnapshot(
+    snapshot: ReturnType<RuntimeSessionHandle['getSnapshot']>,
+  ) {
     const record = updateSession(state, snapshot.session.id, {
       state: snapshot.session.state,
       updatedAt: snapshot.updatedAt,
@@ -1284,9 +1833,19 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     const unsubscribe = handle.subscribe((event) => {
       void (async () => {
         const record = await persistSessionSnapshot(handle.getSnapshot())
-        broadcastEvent(createEvent(event.type, { session: record, ...(event.payload as Record<string, unknown>) }, 'runtime'))
+        broadcastEvent(
+          createEvent(
+            event.type,
+            { session: record, ...(event.payload as Record<string, unknown>) },
+            'runtime',
+          ),
+        )
 
-        if (record.state === 'completed' || record.state === 'failed' || record.state === 'canceled') {
+        if (
+          record.state === 'completed' ||
+          record.state === 'failed' ||
+          record.state === 'canceled'
+        ) {
           activeRuntimeHandles.delete(record.id)
           unsubscribe()
         }
@@ -1332,9 +1891,14 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     return session
   }
 
-  async function controlSession(sessionId: string, action: 'pause' | 'resume' | 'cancel') {
+  async function controlSession(
+    sessionId: string,
+    action: 'pause' | 'resume' | 'cancel',
+  ) {
     requireSession(state, sessionId)
-    const handle = activeRuntimeHandles.get(sessionId) ?? runtimeSessions.getSession(sessionId)
+    const handle =
+      activeRuntimeHandles.get(sessionId) ??
+      runtimeSessions.getSession(sessionId)
     if (!handle) {
       throw new Error(`Session "${sessionId}" is not active in the runtime.`)
     }
@@ -1350,6 +1914,145 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     return await persistSessionSnapshot(handle.getSnapshot())
   }
 
+  async function openForwardedPort(portId: string, body: unknown) {
+    await expireForwardedPorts([portId])
+    const current = requireForwardedPort(portId)
+    if (current.state !== 'forwarded') {
+      throw new Error(`Port "${portId}" is not a forwarded port.`)
+    }
+
+    const payload = asRecord(body)
+    const openedAt = new Date().toISOString()
+    const expiresAt =
+      payload && 'expiresAt' in payload
+        ? requireOptionalTimestampString(payload.expiresAt, 'expiresAt')
+        : current.expiresAt
+
+    const reopened = getForwardedPortSnapshot({
+      ...current,
+      forwardingState: 'open',
+      openedAt,
+      closedAt: undefined,
+      expiredAt: undefined,
+      expiresAt,
+    })
+
+    await upsertAndBroadcast(reopened, 'forwardedPorts', 'port.opened')
+    return reopened
+  }
+
+  async function closeForwardedPort(portId: string) {
+    await expireForwardedPorts([portId])
+    const current = requireForwardedPort(portId)
+    if (current.state !== 'forwarded') {
+      throw new Error(`Port "${portId}" is not a forwarded port.`)
+    }
+
+    const closed = getForwardedPortSnapshot({
+      ...current,
+      forwardingState: 'closed',
+      closedAt: new Date().toISOString(),
+    })
+
+    await upsertAndBroadcast(closed, 'forwardedPorts', 'port.closed')
+    return closed
+  }
+
+  async function expireForwardedPort(portId: string) {
+    await expireForwardedPorts([portId])
+    const current = requireForwardedPort(portId)
+    if (current.state !== 'forwarded') {
+      throw new Error(`Port "${portId}" is not a forwarded port.`)
+    }
+
+    if (current.forwardingState === 'expired') {
+      return current
+    }
+
+    const expired = getForwardedPortSnapshot(
+      markForwardedPortExpired(current, new Date().toISOString()),
+    )
+    await upsertAndBroadcast(expired, 'forwardedPorts', 'port.expired')
+    return expired
+  }
+
+  async function proxyForwardedPortRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    sourceUrl: URL,
+    portId: string,
+    forwardedPath?: string,
+  ) {
+    await expireForwardedPorts([portId])
+    const forwardedPort = requireForwardedPort(portId)
+    if (forwardedPort.state !== 'forwarded') {
+      sendError(response, 409, `Port "${portId}" is not forwarded.`)
+      return
+    }
+
+    if (forwardedPort.protocol !== 'http') {
+      sendError(
+        response,
+        400,
+        `Port "${portId}" does not expose an HTTP service.`,
+      )
+      return
+    }
+
+    if (forwardedPort.forwardingState === 'closed') {
+      sendError(response, 409, `Port "${portId}" is closed.`)
+      return
+    }
+
+    if (forwardedPort.forwardingState === 'expired') {
+      sendError(response, 410, `Port "${portId}" has expired.`)
+      return
+    }
+
+    const method = request.method ?? 'GET'
+    if (!['GET', 'HEAD'].includes(method)) {
+      sendError(
+        response,
+        405,
+        'Managed HTTP URLs currently support GET and HEAD requests only.',
+      )
+      return
+    }
+
+    const targetUrl = new URL(
+      `http://${forwardedPort.targetHost}:${forwardedPort.port}${forwardedPath || '/'}`,
+    )
+    targetUrl.search = sourceUrl.search
+
+    try {
+      const upstream = await fetch(targetUrl, {
+        method,
+        headers: {
+          accept: request.headers.accept?.toString() ?? '*/*',
+        },
+      })
+      const headers = Object.fromEntries(upstream.headers.entries())
+      headers['x-remote-agent-port-id'] = forwardedPort.id
+      headers['x-remote-agent-port-visibility'] = forwardedPort.visibility
+
+      response.writeHead(upstream.status, headers)
+
+      if (method === 'HEAD' || !upstream.body) {
+        response.end()
+        return
+      }
+
+      const payload = Buffer.from(await upstream.arrayBuffer())
+      response.end(payload)
+    } catch {
+      sendError(
+        response,
+        502,
+        `Port "${portId}" is not reachable from the control plane.`,
+      )
+    }
+  }
+
   const server = createServer(async (request, response) => {
     try {
       if (!request.url) {
@@ -1357,7 +2060,10 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         return
       }
 
-      const url = new URL(request.url, `http://${request.headers.host ?? `${config.host}:${config.port}`}`)
+      const url = new URL(
+        request.url,
+        `http://${request.headers.host ?? `${config.host}:${config.port}`}`,
+      )
       const pathname = url.pathname
 
       if (request.method === 'GET' && pathname === '/health') {
@@ -1370,7 +2076,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'GET' && pathname === '/api/events') {
-        const authResult = authenticateRequest(request, config, ['operator-token'])
+        const authResult = authenticateRequest(request, config, [
+          'operator-token',
+        ])
         if (!authResult) {
           sendError(response, 401, 'Unauthorized.')
           return
@@ -1400,7 +2108,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         )
 
         if (replayFrom) {
-          const replayIndex = eventBacklog.findIndex((event) => event.id === replayFrom)
+          const replayIndex = eventBacklog.findIndex(
+            (event) => event.id === replayFrom,
+          )
           if (replayIndex !== -1) {
             for (const event of eventBacklog.slice(replayIndex + 1)) {
               writeSseEvent(response, event)
@@ -1409,7 +2119,10 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
             writeSseEvent(
               response,
               createEvent('session.snapshot', {
-                active: state.sessions.filter((entry) => !['completed', 'failed', 'canceled'].includes(entry.state)),
+                active: state.sessions.filter(
+                  (entry) =>
+                    !['completed', 'failed', 'canceled'].includes(entry.state),
+                ),
               }),
             )
           }
@@ -1417,7 +2130,10 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
           writeSseEvent(
             response,
             createEvent('session.snapshot', {
-              active: state.sessions.filter((entry) => !['completed', 'failed', 'canceled'].includes(entry.state)),
+              active: state.sessions.filter(
+                (entry) =>
+                  !['completed', 'failed', 'canceled'].includes(entry.state),
+              ),
             }),
           )
         }
@@ -1425,6 +2141,34 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         request.on('close', () => {
           clients.delete(response)
         })
+        return
+      }
+
+      const managedPortMatch = pathname.match(/^\/ports\/([^/]+)(\/.*)?$/)
+      if (managedPortMatch) {
+        const forwardedPort = findForwardedPort(managedPortMatch[1])
+        if (!forwardedPort) {
+          notFound(response)
+          return
+        }
+
+        if (forwardedPort.visibility === 'private') {
+          const authResult = authenticateRequest(request, config, [
+            'operator-token',
+          ])
+          if (!authResult) {
+            sendError(response, 401, 'Unauthorized.')
+            return
+          }
+        }
+
+        await proxyForwardedPortRequest(
+          request,
+          response,
+          url,
+          managedPortMatch[1],
+          managedPortMatch[2],
+        )
         return
       }
 
@@ -1456,14 +2200,19 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'POST' && pathname === '/api/workspaces') {
-        const workspace = await requireWorkspaceRecord(await readJsonBody(request), state)
+        const workspace = await requireWorkspaceRecord(
+          await readJsonBody(request),
+          state,
+        )
         await commit(response, workspace, 'workspaces', 'workspace.upserted')
         return
       }
 
       const workspaceMatch = pathname.match(/^\/api\/workspaces\/([^/]+)$/)
       if (request.method === 'GET' && workspaceMatch) {
-        const workspace = state.workspaces.find((entry) => entry.id === workspaceMatch[1])
+        const workspace = state.workspaces.find(
+          (entry) => entry.id === workspaceMatch[1],
+        )
         if (!workspace) {
           notFound(response)
           return
@@ -1474,7 +2223,12 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'DELETE' && workspaceMatch) {
-        await remove<WorkspaceRecord>(response, 'workspaces', workspaceMatch[1], 'workspace.removed')
+        await remove<WorkspaceRecord>(
+          response,
+          'workspaces',
+          workspaceMatch[1],
+          'workspace.removed',
+        )
         return
       }
 
@@ -1501,7 +2255,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         return
       }
 
-      const sessionChangesMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/changes$/)
+      const sessionChangesMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/changes$/,
+      )
       if (request.method === 'GET' && sessionChangesMatch) {
         const session = requireSession(state, sessionChangesMatch[1])
         const changeSet = await getSessionChangeSet(session)
@@ -1509,24 +2265,46 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         return
       }
 
-      const sessionDiffMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/diff$/)
+      const sessionDiffMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/diff$/,
+      )
       if (request.method === 'GET' && sessionDiffMatch) {
         const session = requireSession(state, sessionDiffMatch[1])
         const requestedPath = url.searchParams.get('path') ?? undefined
-        const page = requirePositiveInteger(url.searchParams.get('page'), 'page', 1)
+        const page = requirePositiveInteger(
+          url.searchParams.get('page'),
+          'page',
+          1,
+        )
         const pageSize = Math.min(
-          requirePositiveInteger(url.searchParams.get('pageSize'), 'pageSize', defaultDiffPageSize),
+          requirePositiveInteger(
+            url.searchParams.get('pageSize'),
+            'pageSize',
+            defaultDiffPageSize,
+          ),
           maxDiffPageSize,
         )
         const changeSet = await getSessionChangeSet(session)
-        const diffText = await createSessionDiffText(session.executionPath, changeSet.files, requestedPath)
+        const diffText = await createSessionDiffText(
+          session.executionPath,
+          changeSet.files,
+          requestedPath,
+        )
         sendJson(response, 200, {
-          data: paginateDiffText(session.id, diffText, page, pageSize, requestedPath),
+          data: paginateDiffText(
+            session.id,
+            diffText,
+            page,
+            pageSize,
+            requestedPath,
+          ),
         })
         return
       }
 
-      const sessionControlMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/(pause|resume|cancel)$/)
+      const sessionControlMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/(pause|resume|cancel)$/,
+      )
       if (request.method === 'POST' && sessionControlMatch) {
         const session = await controlSession(
           sessionControlMatch[1],
@@ -1547,10 +2325,14 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         return
       }
 
-      const approvalDecisionMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/)
+      const approvalDecisionMatch = pathname.match(
+        /^\/api\/approvals\/([^/]+)\/decision$/,
+      )
       if (request.method === 'POST' && approvalDecisionMatch) {
         const approvalId = approvalDecisionMatch[1]
-        const approval = state.approvals.find((entry) => entry.id === approvalId)
+        const approval = state.approvals.find(
+          (entry) => entry.id === approvalId,
+        )
 
         if (!approval) {
           notFound(response)
@@ -1559,18 +2341,29 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
 
         const body = asRecord(await readJsonBody(request))
         if (approval.status !== 'pending') {
-          sendError(response, 409, `Approval "${approvalId}" has already been decided.`)
+          sendError(
+            response,
+            409,
+            `Approval "${approvalId}" has already been decided.`,
+          )
           return
         }
 
-        const decision = requireEnum(body?.status, 'status', ['approved', 'rejected'])
+        const decision = requireEnum(body?.status, 'status', [
+          'approved',
+          'rejected',
+        ])
         const decidedAt = new Date().toISOString()
         const updatedApproval: ApprovalRecord = {
           ...approval,
           status: decision,
           decidedAt,
         }
-        await upsertAndBroadcast(updatedApproval, 'approvals', 'approval.decided')
+        await upsertAndBroadcast(
+          updatedApproval,
+          'approvals',
+          'approval.decided',
+        )
         await appendAuditLogEntry(createApprovalAuditLogEntry(updatedApproval))
 
         const pendingDecision = pendingApprovalDecisions.get(approvalId)
@@ -1595,25 +2388,91 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
       }
 
       if (request.method === 'POST' && pathname === '/api/notifications') {
-        const notification = requireNotificationRecord(await readJsonBody(request))
-        await commit(response, notification, 'notifications', 'notification.created')
+        const notification = requireNotificationRecord(
+          await readJsonBody(request),
+        )
+        await commit(
+          response,
+          notification,
+          'notifications',
+          'notification.created',
+        )
         return
       }
 
       if (request.method === 'GET' && pathname === '/api/ports') {
-        sendJson(response, 200, { data: state.forwardedPorts })
+        await expireForwardedPorts()
+
+        const includeInactive =
+          url.searchParams.get('includeInactive') === 'true'
+        const workspaceId = url.searchParams.get('workspaceId') ?? undefined
+        const sessionId = url.searchParams.get('sessionId') ?? undefined
+        const hostId = url.searchParams.get('hostId') ?? undefined
+        const ports = state.forwardedPorts
+          .map((record) => getForwardedPortSnapshot(record))
+          .filter((record) => record.state === 'forwarded')
+          .filter((record) => (hostId ? record.hostId === hostId : true))
+          .filter((record) =>
+            workspaceId ? record.workspaceId === workspaceId : true,
+          )
+          .filter((record) =>
+            sessionId ? record.sessionId === sessionId : true,
+          )
+          .filter((record) =>
+            includeInactive ? true : record.forwardingState === 'open',
+          )
+
+        sendJson(response, 200, { data: ports })
         return
       }
 
       if (request.method === 'POST' && pathname === '/api/ports') {
-        const forwardedPort = requireForwardedPortRecord(await readJsonBody(request))
+        let forwardedPort = requireForwardedPortRecord(
+          await readJsonBody(request),
+          state,
+          publicBaseUrl,
+        )
+        if (shouldExpireForwardedPort(forwardedPort)) {
+          forwardedPort = getForwardedPortSnapshot(
+            markForwardedPortExpired(
+              forwardedPort,
+              forwardedPort.expiresAt ?? new Date().toISOString(),
+            ),
+          )
+        }
+
         await commit(response, forwardedPort, 'forwardedPorts', 'port.upserted')
+        return
+      }
+
+      const portMatch = pathname.match(/^\/api\/ports\/([^/]+)$/)
+      if (request.method === 'GET' && portMatch) {
+        await expireForwardedPorts([portMatch[1]])
+        sendJson(response, 200, { data: requireForwardedPort(portMatch[1]) })
+        return
+      }
+
+      const portControlMatch = pathname.match(
+        /^\/api\/ports\/([^/]+)\/(open|close|expire)$/,
+      )
+      if (request.method === 'POST' && portControlMatch) {
+        const action = portControlMatch[2]
+        const portId = portControlMatch[1]
+        const port =
+          action === 'open'
+            ? await openForwardedPort(portId, await readJsonBody(request))
+            : action === 'close'
+              ? await closeForwardedPort(portId)
+              : await expireForwardedPort(portId)
+
+        sendJson(response, 200, { data: port })
         return
       }
 
       notFound(response)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unexpected server error.'
+      const message =
+        error instanceof Error ? error.message : 'Unexpected server error.'
       sendError(response, 400, message)
     }
   })
@@ -1631,16 +2490,26 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
     throw new Error('Control plane failed to bind to a TCP address.')
   }
 
+  publicBaseUrl = `http://${config.host}:${address.port}`
+  state.forwardedPorts = state.forwardedPorts.map((record) =>
+    getForwardedPortSnapshot(record),
+  )
+  await expireForwardedPorts()
+
   return {
     config,
     runtime,
-    url: `http://${config.host}:${address.port}`,
+    url: publicBaseUrl,
     getState() {
       return cloneState(state)
     },
     async close() {
       for (const pendingDecision of pendingApprovalDecisions.values()) {
-        pendingDecision.reject(new Error('Control plane stopped while waiting for an approval decision.'))
+        pendingDecision.reject(
+          new Error(
+            'Control plane stopped while waiting for an approval decision.',
+          ),
+        )
       }
       pendingApprovalDecisions.clear()
 
@@ -1669,7 +2538,9 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
 export async function runControlPlaneCli() {
   const controlPlane = await startControlPlaneServer()
 
-  process.stdout.write(`RemoteAgentServer control plane listening on ${controlPlane.url}\n`)
+  process.stdout.write(
+    `RemoteAgentServer control plane listening on ${controlPlane.url}\n`,
+  )
   process.stdout.write(`State file: ${controlPlane.config.dataFile}\n`)
 
   const shutdown = async () => {
