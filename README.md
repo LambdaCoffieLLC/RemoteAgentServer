@@ -25,7 +25,7 @@ The server app at `apps/server` is now a runnable control plane for the single-u
 
 - hosts at `/api/hosts`
 - workspaces at `/api/workspaces` and `/api/workspaces/:id`
-- sessions at `/api/sessions`, `/api/sessions/:id`, and `/api/sessions/:id/{pause,resume,cancel}`
+- sessions at `/api/sessions`, `/api/sessions/:id`, `/api/sessions/:id/changes`, `/api/sessions/:id/diff`, and `/api/sessions/:id/{pause,resume,cancel}`
 - approvals at `/api/approvals`
 - notifications at `/api/notifications`
 - forwarded ports at `/api/ports`
@@ -178,6 +178,15 @@ The control plane starts the session against the workspace's runtime host, persi
 
 Workspace mode keeps the execution path pointed at the registered repository for simple workflows. Worktree mode creates a sibling checkout under `.remote-agent-server-worktrees/<workspace-id>/...`, stores the worktree path and branch metadata on the session record, and points runtime execution at that isolated checkout instead. Clients can inspect the current recoverable session state, including accumulated logs, output, `executionPath`, and optional `worktree` metadata, with `GET /api/sessions/<session-id>`. Operators can pause, resume, and cancel active sessions with `POST /api/sessions/<session-id>/pause`, `POST /api/sessions/<session-id>/resume`, and `POST /api/sessions/<session-id>/cancel`. Reconnecting SSE clients can also send `Last-Event-ID` to replay missed session events from the in-memory backlog.
 
+### Session Change Review
+
+Operators can review git-backed session changes without leaving the control plane:
+
+- `GET /api/sessions/<session-id>/changes` returns the changed-file list for the session execution path, including whether each file was added, modified, renamed, or removed plus a compact patch summary.
+- `GET /api/sessions/<session-id>/diff` returns diff text for the full session or a single file. Use the optional `path`, `page`, and `pageSize` query parameters to focus the review and page through large diffs.
+
+Large diffs degrade gracefully through pagination. The diff response includes `page`, `pageSize`, `totalLines`, `totalPages`, `previousPage`, `nextPage`, and `truncated` so clients can progressively load more of a patch instead of rendering the full diff at once.
+
 If stale worktrees need to be cleaned up manually, list them from the registered repository and then remove or prune them with git:
 
 ```bash
@@ -236,6 +245,16 @@ curl -sS \
 curl -sS \
   -H 'Authorization: Bearer operator-dev-token' \
   http://127.0.0.1:4318/api/sessions/session-1
+
+printf 'review change\n' >> "${REPO_PATH}/README.md"
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  http://127.0.0.1:4318/api/sessions/session-1/changes
+
+curl -sS \
+  -H 'Authorization: Bearer operator-dev-token' \
+  "http://127.0.0.1:4318/api/sessions/session-1/diff?path=README.md&page=1&pageSize=40"
 
 curl -sS -X POST \
   -H 'Authorization: Bearer operator-dev-token' \

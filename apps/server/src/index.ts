@@ -14,6 +14,10 @@ import {
   type RuntimeSessionHandle,
 } from '@remote-agent-server/runtime'
 import {
+  type SessionChangedFile,
+  type SessionChangeKind,
+  type SessionChangeSet,
+  type SessionDiffPage,
   createSessionDescriptor,
   type SessionDescriptor,
   type SessionLogEntry,
@@ -30,6 +34,9 @@ const defaultDataFile = '.remote-agent-server/control-plane.json'
 const jsonContentType = 'application/json; charset=utf-8'
 const eventStreamContentType = 'text/event-stream; charset=utf-8'
 const execFileAsync = promisify(execFile)
+const defaultDiffPageSize = 200
+const maxDiffPageSize = 1000
+const gitCommandMaxBuffer = 10 * 1024 * 1024
 
 export interface HostRecord {
   id: string
@@ -475,8 +482,8 @@ async function resolveGitRepository(path: string) {
   }
 }
 
-async function runGitCommand(path: string, args: string[]) {
-  return await execFileAsync('git', ['-C', path, ...args])
+async function runGitCommand(path: string, args: string[], maxBuffer = gitCommandMaxBuffer) {
+  return await execFileAsync('git', ['-C', path, ...args], { maxBuffer })
 }
 
 async function listGitStatusEntries(path: string) {
@@ -602,6 +609,280 @@ async function detectDefaultBranch(path: string) {
   }
 
   throw new Error(`Repository path "${path}" does not expose a default branch. Provide "defaultBranch" explicitly.`)
+}
+
+function classifySessionChange(indexStatus: string, workingTreeStatus: string): SessionChangeKind {
+  if (indexStatus === 'R' || workingTreeStatus === 'R') {
+    return 'renamed'
+  }
+
+  if (indexStatus === 'D' || workingTreeStatus === 'D') {
+    return 'removed'
+  }
+
+  if (indexStatus === 'A' || workingTreeStatus === 'A' || workingTreeStatus === '?') {
+    return 'added'
+  }
+
+  return 'modified'
+}
+
+function parseGitStatusEntries(output: string): SessionChangedFile[] {
+  const records = output.split('\0').filter((entry) => entry.length > 0)
+  const files: SessionChangedFile[] = []
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (record.length < 4) {
+      continue
+    }
+
+    const indexStatus = record[0] ?? ' '
+    const workingTreeStatus = record[1] ?? ' '
+    const path = record.slice(3)
+    let previousPath: string | undefined
+
+    if (indexStatus === 'R' || workingTreeStatus === 'R') {
+      previousPath = records[index + 1]
+      index += 1
+    }
+
+    files.push({
+      path,
+      previousPath,
+      kind: classifySessionChange(indexStatus, workingTreeStatus),
+      indexStatus,
+      workingTreeStatus,
+      staged: indexStatus !== ' ' && indexStatus !== '?',
+      unstaged: workingTreeStatus !== ' ',
+    })
+  }
+
+  return files.sort((left, right) => left.path.localeCompare(right.path))
+}
+
+interface DetectedRename {
+  path: string
+  previousPath: string
+}
+
+function parseGitNameStatusEntries(output: string) {
+  const records = output.split('\0').filter((entry) => entry.length > 0)
+  const renames: DetectedRename[] = []
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (!record.startsWith('R')) {
+      continue
+    }
+
+    const previousPath = records[index + 1]
+    const path = records[index + 2]
+    if (!previousPath || !path) {
+      continue
+    }
+
+    renames.push({
+      path,
+      previousPath,
+    })
+    index += 2
+  }
+
+  return renames
+}
+
+async function listDetectedRenames(path: string) {
+  if (await hasCommittedHead(path)) {
+    const { stdout } = await runGitCommand(path, ['diff', '--find-renames', '--name-status', '-z', 'HEAD'])
+    return parseGitNameStatusEntries(stdout)
+  }
+
+  const staged = await runGitCommand(path, ['diff', '--cached', '--find-renames', '--name-status', '-z', '--root'])
+  const unstaged = await runGitCommand(path, ['diff', '--find-renames', '--name-status', '-z'])
+  return [...parseGitNameStatusEntries(staged.stdout), ...parseGitNameStatusEntries(unstaged.stdout)]
+}
+
+function mergeDetectedRenames(files: SessionChangedFile[], renames: DetectedRename[]) {
+  const mergedFiles = [...files]
+
+  for (const rename of renames) {
+    const existingRenameIndex = mergedFiles.findIndex(
+      (file) => file.path === rename.path && file.previousPath === rename.previousPath && file.kind === 'renamed',
+    )
+    if (existingRenameIndex !== -1) {
+      continue
+    }
+
+    const removedIndex = mergedFiles.findIndex((file) => file.path === rename.previousPath && file.kind === 'removed')
+    const addedIndex = mergedFiles.findIndex((file) => file.path === rename.path && file.kind === 'added')
+    const addedFile = addedIndex === -1 ? undefined : mergedFiles[addedIndex]
+
+    const renamedFile: SessionChangedFile = {
+      path: rename.path,
+      previousPath: rename.previousPath,
+      kind: 'renamed',
+      indexStatus: 'R',
+      workingTreeStatus: addedFile?.workingTreeStatus ?? ' ',
+      staged: true,
+      unstaged: addedFile?.unstaged ?? false,
+    }
+
+    if (removedIndex !== -1) {
+      mergedFiles.splice(removedIndex, 1)
+    }
+
+    const adjustedAddedIndex = mergedFiles.findIndex((file) => file.path === rename.path && file.kind === 'added')
+    if (adjustedAddedIndex !== -1) {
+      mergedFiles.splice(adjustedAddedIndex, 1, renamedFile)
+    } else {
+      mergedFiles.push(renamedFile)
+    }
+  }
+
+  return mergedFiles.sort((left, right) => left.path.localeCompare(right.path))
+}
+
+async function listSessionChangedFiles(path: string) {
+  const { stdout } = await runGitCommand(path, ['status', '--porcelain=1', '-z', '--find-renames'])
+  const files = parseGitStatusEntries(stdout)
+  const renames = await listDetectedRenames(path)
+  return mergeDetectedRenames(files, renames)
+}
+
+function createPatchSummary(files: SessionChangedFile[]) {
+  const lines = [`${files.length} changed file${files.length === 1 ? '' : 's'}`]
+
+  for (const file of files) {
+    if (file.kind === 'renamed' && file.previousPath) {
+      lines.push(`R ${file.previousPath} -> ${file.path}`)
+      continue
+    }
+
+    const prefix = file.kind === 'added'
+      ? 'A'
+      : file.kind === 'removed'
+        ? 'D'
+        : 'M'
+    lines.push(`${prefix} ${file.path}`)
+  }
+
+  return {
+    text: lines.join('\n'),
+    lineCount: lines.length,
+  }
+}
+
+async function readUntrackedFileDiff(path: string, filePath: string) {
+  try {
+    const { stdout } = await runGitCommand(path, ['diff', '--no-index', '--', '/dev/null', filePath])
+    return stdout
+  } catch (error) {
+    const candidate = error as { stdout?: string }
+    if (typeof candidate.stdout === 'string') {
+      return candidate.stdout
+    }
+
+    throw error
+  }
+}
+
+async function createTrackedDiffText(path: string, filePaths?: string[]) {
+  const pathArgs = filePaths && filePaths.length > 0 ? ['--', ...filePaths] : []
+
+  if (await hasCommittedHead(path)) {
+    const { stdout } = await runGitCommand(path, ['diff', '--find-renames', 'HEAD', ...pathArgs])
+    return stdout
+  }
+
+  const staged = await runGitCommand(path, ['diff', '--cached', '--find-renames', '--root', ...pathArgs])
+  const unstaged = await runGitCommand(path, ['diff', '--find-renames', ...pathArgs])
+  return `${staged.stdout}${unstaged.stdout}`
+}
+
+async function createSessionDiffText(path: string, files: SessionChangedFile[], requestedPath?: string) {
+  const selectedFiles = requestedPath
+    ? files.filter((file) => file.path === requestedPath || file.previousPath === requestedPath)
+    : files
+
+  if (selectedFiles.length === 0) {
+    throw new Error(
+      requestedPath
+        ? `Session change "${requestedPath}" was not found.`
+        : 'No changed files were found for the session.',
+    )
+  }
+
+  const trackedPaths = new Set<string>()
+  const diffSections: string[] = []
+
+  for (const file of selectedFiles) {
+    if (file.previousPath) {
+      trackedPaths.add(file.previousPath)
+    }
+
+    if (file.workingTreeStatus === '?' && file.indexStatus === '?') {
+      diffSections.push(await readUntrackedFileDiff(path, file.path))
+      continue
+    }
+
+    trackedPaths.add(file.path)
+  }
+
+  if (trackedPaths.size > 0) {
+    const trackedDiff = await createTrackedDiffText(path, [...trackedPaths])
+    if (trackedDiff.length > 0) {
+      diffSections.unshift(trackedDiff)
+    }
+  }
+
+  return diffSections.join('').trimEnd()
+}
+
+function paginateDiffText(sessionId: string, text: string, page: number, pageSize: number, path?: string): SessionDiffPage {
+  const totalLines = text.length === 0 ? 0 : text.split('\n').length
+  const totalPages = Math.max(1, Math.ceil(totalLines / pageSize))
+  const safePage = Math.min(Math.max(page, 1), totalPages)
+  const start = totalLines === 0 ? 0 : (safePage - 1) * pageSize
+  const end = totalLines === 0 ? 0 : Math.min(start + pageSize, totalLines)
+  const lines = totalLines === 0 ? [] : text.split('\n')
+
+  return {
+    sessionId,
+    path,
+    page: safePage,
+    pageSize,
+    totalLines,
+    totalPages,
+    truncated: totalLines > pageSize,
+    previousPage: safePage > 1 ? safePage - 1 : undefined,
+    nextPage: end < totalLines ? safePage + 1 : undefined,
+    text: lines.slice(start, end).join('\n'),
+  }
+}
+
+function requirePositiveInteger(value: string | null, fieldName: string, fallback: number) {
+  if (value === null || value.trim().length === 0) {
+    return fallback
+  }
+
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`"${fieldName}" must be a positive integer.`)
+  }
+
+  return parsed
+}
+
+async function getSessionChangeSet(session: SessionRecord): Promise<SessionChangeSet> {
+  const files = await listSessionChangedFiles(session.executionPath)
+  return {
+    sessionId: session.id,
+    workspacePath: session.workspacePath,
+    executionPath: session.executionPath,
+    files,
+    summary: createPatchSummary(files),
+  }
 }
 
 function requireRegisteredHost(state: ControlPlaneState, hostId: string, fieldName: string) {
@@ -1117,6 +1398,31 @@ export async function startControlPlaneServer(options: StartControlPlaneOptions 
         }
 
         sendJson(response, 200, { data: session })
+        return
+      }
+
+      const sessionChangesMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/changes$/)
+      if (request.method === 'GET' && sessionChangesMatch) {
+        const session = requireSession(state, sessionChangesMatch[1])
+        const changeSet = await getSessionChangeSet(session)
+        sendJson(response, 200, { data: changeSet })
+        return
+      }
+
+      const sessionDiffMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/diff$/)
+      if (request.method === 'GET' && sessionDiffMatch) {
+        const session = requireSession(state, sessionDiffMatch[1])
+        const requestedPath = url.searchParams.get('path') ?? undefined
+        const page = requirePositiveInteger(url.searchParams.get('page'), 'page', 1)
+        const pageSize = Math.min(
+          requirePositiveInteger(url.searchParams.get('pageSize'), 'pageSize', defaultDiffPageSize),
+          maxDiffPageSize,
+        )
+        const changeSet = await getSessionChangeSet(session)
+        const diffText = await createSessionDiffText(session.executionPath, changeSet.files, requestedPath)
+        sendJson(response, 200, {
+          data: paginateDiffText(session.id, diffText, page, pageSize, requestedPath),
+        })
         return
       }
 

@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto'
 export const sessionStates = ['queued', 'running', 'paused', 'blocked', 'completed', 'failed', 'canceled'] as const
 export const sessionLogLevels = ['info', 'warning', 'error'] as const
 export const sessionOutputStreams = ['stdout', 'stderr'] as const
+export const sessionChangeKinds = ['added', 'modified', 'removed', 'renamed'] as const
 
 export type SessionState = (typeof sessionStates)[number]
 export type SessionMode = 'workspace' | 'worktree'
 export type SessionLogLevel = (typeof sessionLogLevels)[number]
 export type SessionOutputStream = (typeof sessionOutputStreams)[number]
+export type SessionChangeKind = (typeof sessionChangeKinds)[number]
 
 export interface SessionWorktreeMetadata {
   path: string
@@ -35,6 +37,42 @@ export interface SessionOutputEntry {
   id: string
   timestamp: string
   stream: SessionOutputStream
+  text: string
+}
+
+export interface SessionChangedFile {
+  path: string
+  previousPath?: string
+  kind: SessionChangeKind
+  indexStatus: string
+  workingTreeStatus: string
+  staged: boolean
+  unstaged: boolean
+}
+
+export interface SessionPatchSummary {
+  text: string
+  lineCount: number
+}
+
+export interface SessionChangeSet {
+  sessionId: string
+  workspacePath: string
+  executionPath: string
+  files: SessionChangedFile[]
+  summary: SessionPatchSummary
+}
+
+export interface SessionDiffPage {
+  sessionId: string
+  path?: string
+  page: number
+  pageSize: number
+  totalLines: number
+  totalPages: number
+  truncated: boolean
+  previousPage?: number
+  nextPage?: number
   text: string
 }
 

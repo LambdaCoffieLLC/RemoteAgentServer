@@ -161,7 +161,9 @@
         "The change view clearly identifies added, modified, renamed, and removed files",
         "At least one user-facing client exercises the diff-review flow in an integration or smoke test"
       ],
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Added git-backed session change review to the control plane with GET /api/sessions/:id/changes for changed-file listings plus patch summaries and GET /api/sessions/:id/diff for paginated diff review with graceful truncation metadata. Extended @remote-agent-server/sessions with shared change-review contracts, added a web client review wrapper in apps/web so a user-facing client can list changes and page through diffs, documented the new review flow in README.md, and added product-owned integration coverage in tests/session-diff-review.test.ts for added, modified, renamed, and removed files plus paginated diff retrieval through both raw server APIs and the web client. Verified with pnpm verify."
     },
     {
       "id": "US-011",
