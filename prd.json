@@ -1,6 +1,6 @@
 {
   "project": "RemoteAgentServer",
-  "branchName": "ralph-loop-attempt-2",
+  "branchName": "ralph-loop-attempt-3",
   "deliveryStandards": [
     "Treat this PRD as the source of truth for scope and completion. A story is not complete when it only adds typed helpers, mocks, or static examples if the story calls for a runnable app, service, installer, or workflow.",
     "Do not mark a story passed unless the relevant surface can be run manually from this repository with documented commands.",
@@ -10,7 +10,11 @@
     "This phase targets a single-user self-hosted system. Auth can remain token-based, but tokens and bootstrap secrets must be configurable through environment variables or config files and must not be hardcoded as the only production path.",
     "This phase may use JSON persistence if it is durable enough for restart recovery, well documented, and covered by tests. If JSON persistence becomes a limiter, SQLite is the preferred next persistence step.",
     "A story that introduces a client application must deliver an actual runnable client package with explicit local run commands, not only a client SDK.",
-    "A story that introduces operational behavior must include failure handling, useful errors, and at least one documented manual smoke test path."
+    "A story that introduces operational behavior must include failure handling, useful errors, and at least one documented manual smoke test path.",
+    "Only the active story may change its own passes or notes fields. If a later story changes code paths or user flows covered by earlier completed stories, the current story must document which earlier stories were impacted and what regression checks were rerun.",
+    "Stories that touch shared server, runtime, auth, or client infrastructure must extend regression coverage for previously completed behavior they affect.",
+    "Do not consider the PRD run complete unless the final branch tip passes the full verification command with all stories integrated together.",
+    "If the final integrated branch fails verification, leave the remaining work explicitly unfinished in the PRD instead of claiming full completion."
   ],
   "userStories": [
     {
@@ -293,7 +297,8 @@
         "Server and runtime flows have integration tests that exercise real package boundaries",
         "At least the primary operator journeys for server plus client surfaces have smoke or end-to-end coverage where practical",
         "The root verification command runs product-owned tests in addition to Ralph loop tests",
-        "Test ownership and test scope are documented so future stories extend the right test layer"
+        "Test ownership and test scope are documented so future stories extend the right test layer",
+        "Stories that modify shared behavior must update the relevant regression tests instead of relying only on new story-specific tests"
       ],
       "priority": 1
     },
@@ -307,6 +312,19 @@
         "The README includes manual smoke-test commands for the MVP",
         "The README explains the branch strategy for Ralph loop attempts and how to start a new attempt",
         "The README links to the deeper docs for runtime install, architecture, provider setup, and security expectations"
+      ],
+      "priority": 1
+    },
+    {
+      "id": "US-023",
+      "title": "Run a final regression and release-readiness pass",
+      "description": "As a maintainer, I want a final integration hardening pass so that the branch only claims completion when the combined system still works end to end after all stories land.",
+      "acceptanceCriteria": [
+        "The full root verification command passes on the final branch tip after all completed stories are integrated together",
+        "Key operator flows are revalidated end to end: server startup, workspace registration, session lifecycle, approvals, diff review, forwarded ports, detected port promotion, notifications, and session recovery",
+        "Any regressions introduced by later stories are fixed before the PRD is marked complete",
+        "The final PRD notes identify which high-risk earlier stories were revalidated during the hardening pass",
+        "README and supporting docs reflect the final integrated behavior rather than only per-story local changes"
       ],
       "priority": 1
     }
