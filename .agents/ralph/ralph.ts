@@ -98,24 +98,7 @@ function setLogScope(scope: string) {
   currentLogScope = scope
 }
 
-function getLogFiles(): LogFiles {
-  const existing = logFilesByScope.get(currentLogScope)
-  if (existing) {
-    return existing
-  }
-
-  mkdirSync(logsDir, { recursive: true })
-  const scopeDir = resolve(logsDir, sanitizeLogScope(currentLogScope))
-  mkdirSync(scopeDir, { recursive: true })
-
-  const logFiles = {
-    scope: currentLogScope,
-    eventLogFile: resolve(scopeDir, `${runStamp}-events.log`),
-    runLogFile: resolve(scopeDir, `${runStamp}-run.log`),
-    lastMessageFile: resolve(scopeDir, `${runStamp}-last-message.txt`),
-  }
-  logFilesByScope.set(currentLogScope, logFiles)
-
+function writeLatestRunPointer(logFiles: LogFiles) {
   writeFileSync(
     latestRunFile,
     JSON.stringify(
@@ -130,6 +113,28 @@ function getLogFiles(): LogFiles {
       2,
     ) + '\n',
   )
+}
+
+function getLogFiles(): LogFiles {
+  const existing = logFilesByScope.get(currentLogScope)
+  if (existing) {
+    mkdirSync(dirname(existing.eventLogFile), { recursive: true })
+    writeLatestRunPointer(existing)
+    return existing
+  }
+
+  mkdirSync(logsDir, { recursive: true })
+  const scopeDir = resolve(logsDir, sanitizeLogScope(currentLogScope))
+  mkdirSync(scopeDir, { recursive: true })
+
+  const logFiles = {
+    scope: currentLogScope,
+    eventLogFile: resolve(scopeDir, `${runStamp}-events.log`),
+    runLogFile: resolve(scopeDir, `${runStamp}-run.log`),
+    lastMessageFile: resolve(scopeDir, `${runStamp}-last-message.txt`),
+  }
+  logFilesByScope.set(currentLogScope, logFiles)
+  writeLatestRunPointer(logFiles)
 
   return logFiles
 }
@@ -217,6 +222,7 @@ function cleanGeneratedArtifacts() {
   if (result.status !== 0) {
     throw new Error(result.stderr || 'Failed to clean generated Ralph artifacts.')
   }
+  logFilesByScope.clear()
 }
 
 function maybeHandleGeneratedArtifacts() {
