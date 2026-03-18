@@ -1,6 +1,6 @@
 {
   "project": "RemoteAgentServer",
-  "branchName": "ralph-loop-attempt-3",
+  "branchName": "ralph-loop-attempt-4",
   "deliveryStandards": [
     "Treat this PRD as the source of truth for scope and completion. A story is not complete when it only adds typed helpers, mocks, or static examples if the story calls for a runnable app, service, installer, or workflow.",
     "Do not mark a story passed unless the relevant surface can be run manually from this repository with documented commands.",
@@ -11,10 +11,12 @@
     "This phase may use JSON persistence if it is durable enough for restart recovery, well documented, and covered by tests. If JSON persistence becomes a limiter, SQLite is the preferred next persistence step.",
     "A story that introduces a client application must deliver an actual runnable client package with explicit local run commands, not only a client SDK.",
     "A story that introduces operational behavior must include failure handling, useful errors, and at least one documented manual smoke test path.",
+    "If a story claims an end-to-end user-facing workflow, the acceptance proof must exercise the real workflow from the user surface through the backing service behavior. API-only plumbing or mocked records are not enough unless the story is explicitly API-only.",
     "Only the active story may change its own passes or notes fields. If a later story changes code paths or user flows covered by earlier completed stories, the current story must document which earlier stories were impacted and what regression checks were rerun.",
     "Stories that touch shared server, runtime, auth, or client infrastructure must extend regression coverage for previously completed behavior they affect.",
     "Do not consider the PRD run complete unless the final branch tip passes the full verification command with all stories integrated together.",
-    "If the final integrated branch fails verification, leave the remaining work explicitly unfinished in the PRD instead of claiming full completion."
+    "If the final integrated branch fails verification, leave the remaining work explicitly unfinished in the PRD instead of claiming full completion.",
+    "PRD notes for completed stories should name the exact automated tests and verification commands that were rerun, especially when the story changed shared behavior or revalidated an earlier story."
   ],
   "userStories": [
     {
@@ -81,9 +83,14 @@
         "Local workspaces support the same session APIs as remote workspaces",
         "Providers do not require separate local-only implementations",
         "Clients clearly distinguish local and remote hosts",
-        "Local and remote flows share the same core runtime abstractions and tests prove the parity"
+        "Local and remote flows share the same core runtime abstractions and tests prove the parity",
+        "At least one user-facing client can create or monitor a local-mode session through the same control-plane or runtime contract used for remote sessions"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "Do not satisfy this story by adding a separate mock-only local client path. The same runtime session lifecycle should back both local and remote flows.",
+        "The acceptance proof should show a real local repository path, a real local runtime mode, and the resulting local session appearing distinctly in a client surface."
+      ]
     },
     {
       "id": "US-006",
@@ -187,9 +194,15 @@
         "Detected ports appear in clients with suggested labels when possible",
         "Users can promote a detected port into a managed forward",
         "Detected ports are not exposed externally until a user forwards them",
-        "Detection and promotion flows are covered by automated integration tests"
+        "Detection and promotion flows are covered by automated integration tests",
+        "Automated coverage uses an actual listening process or server so detection is proven end to end rather than by seeded detected-port records",
+        "At least one client surface can display a detected port and promote it into a managed forward in an integrated test or smoke flow"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "This story is not complete if the server can list synthetic detected ports but promotion fails from that exact list result.",
+        "The key proof is: start a real listening service, detect it, show it in a client or API response, promote that exact detected port, and successfully reach the managed URL afterward."
+      ]
     },
     {
       "id": "US-014",
@@ -231,9 +244,14 @@
         "The desktop app reuses shared packages from the pnpm monorepo",
         "Users can switch between local and remote workspaces in one interface",
         "The desktop app stores its token or connection secrets in a desktop-appropriate way for a single-user setup",
-        "The desktop app has smoke or integration coverage for the primary operator flow"
+        "The desktop app has smoke or integration coverage for the primary operator flow",
+        "The desktop shell renders a real UI for the operator flow instead of only exposing desktop-specific helper modules"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "An Electron or Tauri shell is acceptable, but the result must include a real launchable desktop window and not just desktop-oriented TypeScript APIs.",
+        "The proof should include connection persistence, a visible workspace switcher, and at least one remote plus one local workflow exercised from the desktop surface."
+      ]
     },
     {
       "id": "US-017",
@@ -257,9 +275,14 @@
         "The system sends notifications for approval required, failed session, and completed session events",
         "Notifications can deep-link into the related session where supported",
         "Users can mute or customize notification categories",
-        "At least one supported client demonstrates end-to-end notification delivery in an automated test or documented smoke flow"
+        "At least one supported client demonstrates end-to-end notification delivery in an automated test or documented smoke flow",
+        "API-only notification records or SSE events are not sufficient; at least one real client must show delivery, click handling, and deep-link behavior"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "A web client is acceptable for this story if it covers permission handling, opt-in state, category muting, delivery, and click-through into the related session.",
+        "The acceptance proof should verify the user-visible click result, not just that the notification payload contains a deep link string."
+      ]
     },
     {
       "id": "US-019",
@@ -270,9 +293,14 @@
         "Each entry includes actor, target, timestamp, and outcome",
         "Authorized users can inspect the audit log",
         "Critical security-relevant events are not silently dropped",
-        "The audit log survives restart and is covered by integration tests"
+        "The audit log survives restart and is covered by integration tests",
+        "The audit log is available through an explicit API or client surface rather than existing only as internal stored state"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "Audit entries should be easy to correlate back to sessions, approvals, ports, or hosts using stable identifiers in the payload.",
+        "This story should revalidate earlier flows that are expected to emit audit events instead of adding isolated audit-only fixtures."
+      ]
     },
     {
       "id": "US-020",
@@ -284,9 +312,14 @@
         "Documentation explains the pnpm monorepo layout and developer commands",
         "Documentation includes provider setup for Claude Code, Codex, and OpenCode",
         "Documentation explains port forwarding behavior, auth expectations, and security boundaries",
-        "Documentation clearly distinguishes what is production-ready, what is MVP, and what is still incomplete"
+        "Documentation clearly distinguishes what is production-ready, what is MVP, and what is still incomplete",
+        "README smoke commands and run commands reflect the branch's actual runnable packages and verified behavior"
       ],
-      "priority": 2
+      "priority": 2,
+      "implementationNotes": [
+        "Do not document flows that are not actually runnable on the branch tip.",
+        "When features remain incomplete, the docs should say so plainly instead of implying full support."
+      ]
     },
     {
       "id": "US-021",
@@ -324,9 +357,14 @@
         "Key operator flows are revalidated end to end: server startup, workspace registration, session lifecycle, approvals, diff review, forwarded ports, detected port promotion, notifications, and session recovery",
         "Any regressions introduced by later stories are fixed before the PRD is marked complete",
         "The final PRD notes identify which high-risk earlier stories were revalidated during the hardening pass",
-        "README and supporting docs reflect the final integrated behavior rather than only per-story local changes"
+        "README and supporting docs reflect the final integrated behavior rather than only per-story local changes",
+        "This story runs only after all other intended implementation stories for the branch are complete"
       ],
-      "priority": 1
+      "priority": 3,
+      "implementationNotes": [
+        "This is a hardening and final-validation story, not a substitute for unfinished feature stories.",
+        "It may make small integration fixes, but it should not be used to declare missing major capabilities acceptable."
+      ]
     }
   ]
 }
