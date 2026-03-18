@@ -5,6 +5,8 @@
   "packageManager": "pnpm@10.32.1",
   "scripts": {
     "ralph": "node --import tsx .agents/ralph/ralph.ts",
+    "ralph:clean": "node scripts/ralph-clean.mjs",
+    "ralph:clean:all": "node scripts/ralph-clean.mjs --include-node-modules",
     "ralph:danger": "RALPH_CODEX_BYPASS=true node --import tsx .agents/ralph/ralph.ts",
     "test": "node --import tsx --test .agents/ralph/tests/*.test.ts",
     "verify:ralph": "pnpm test && pnpm exec tsc --noEmit"

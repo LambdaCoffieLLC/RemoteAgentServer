@@ -27,8 +27,16 @@ const testCommand = (process.env.RALPH_VERIFY_COMMAND ?? 'pnpm verify:ralph').tr
 const codexSandbox = process.env.RALPH_CODEX_SANDBOX ?? 'workspace-write'
 const codexBypassEnabled = process.env.RALPH_CODEX_BYPASS === 'true'
 const codexSearchEnabled = process.env.RALPH_CODEX_SEARCH === 'true'
+const autoCleanEnabled = process.env.RALPH_AUTO_CLEAN === 'true'
 const missing = Symbol('missing')
 const runStamp = new Date().toISOString().replace(/[:.]/g, '-')
+const cleanupTargets = [
+  '.agents/ralph/latest-run.json',
+  '.agents/ralph/logs',
+  '.agents/ralph/verification',
+  'apps',
+  'packages',
+] as const
 
 type LogFiles = {
   scope: string
@@ -193,6 +201,39 @@ function ensureCleanRepo() {
   if ((status.stdout ?? '').trim()) {
     throw new Error('Repo is dirty. Commit or stash changes before running Ralph.')
   }
+}
+
+function getIgnoredCleanupCandidates() {
+  const result = git(['status', '--ignored', '--porcelain', '--', ...cleanupTargets])
+  return (result.stdout ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('!! ') || line.startsWith('?? '))
+    .map((line) => line.slice(3))
+}
+
+function cleanGeneratedArtifacts() {
+  const result = git(['clean', '-fdx', '--', ...cleanupTargets])
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'Failed to clean generated Ralph artifacts.')
+  }
+}
+
+function maybeHandleGeneratedArtifacts() {
+  const candidates = getIgnoredCleanupCandidates()
+  if (candidates.length === 0) {
+    return
+  }
+
+  if (autoCleanEnabled) {
+    cleanGeneratedArtifacts()
+    logEvent(`Pre-cleaned generated artifacts: ${cleanupTargets.join(', ')}`)
+    return
+  }
+
+  logEvent(
+    `Detected ignored generated artifacts (${candidates.join(', ')}). Run "pnpm ralph:clean" before a fresh run, or set RALPH_AUTO_CLEAN=true to let Ralph clean them automatically.`,
+  )
 }
 
 function checkoutBranch(branch: string) {
@@ -752,6 +793,7 @@ export async function main() {
       ? `Codex config: bypass=true search=${codexSearchEnabled}`
       : `Codex config: sandbox=${codexSandbox} search=${codexSearchEnabled}`,
   )
+  maybeHandleGeneratedArtifacts()
   ensureCleanRepo()
 
   const prd = loadPrd()

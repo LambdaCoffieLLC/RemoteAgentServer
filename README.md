@@ -6,6 +6,7 @@ RemoteAgentServer is reset to a Ralph-driven starting point. The repository keep
 
 ```bash
 pnpm install
+pnpm ralph:clean
 pnpm test
 pnpm verify:ralph
 pnpm ralph
@@ -34,4 +35,7 @@ repo/
 - `.agents/ralph` contains the agent-specific runner, prompt rules, tests, and runtime logs.
 - `.agents/ralph/verification` stores per-story verification artifacts, including changed files and before/after automated-test counts for each attempt.
 - `pnpm ralph` defaults to Codex `workspace-write`; `pnpm ralph:danger` uses the Codex bypass flag with no sandbox or approval gates.
+- `pnpm ralph:clean` removes generated `apps/`, `packages/`, and Ralph run artifacts left behind from prior runs while preserving the root `node_modules`.
+- `pnpm ralph:clean:all` also removes the root `node_modules` if you want a fully cold reset.
+- `RALPH_AUTO_CLEAN=true pnpm ralph` lets Ralph run the same cleanup automatically before a fresh run.
 - All user stories are reset to unfinished so Ralph can re-execute the entire PRD from the beginning.
