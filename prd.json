@@ -1,6 +1,6 @@
 {
   "project": "RemoteAgentServer",
-  "branchName": "ralph-loop-attempt-5",
+  "branchName": "ralph-loop-attempt-6",
   "deliveryStandards": [
     "Treat this PRD as the source of truth for scope and completion. A story is not complete when it only adds typed helpers, mocks, or static examples if the story calls for a runnable app, service, installer, or workflow.",
     "Do not mark a story passed unless the relevant surface can be run manually from this repository with documented commands.",
@@ -22,7 +22,10 @@
     "Stories that touch shared server, runtime, auth, or client infrastructure must extend regression coverage for previously completed behavior they affect.",
     "Do not consider the PRD run complete unless the final branch tip passes the full verification command with all stories integrated together.",
     "If the final integrated branch fails verification, leave the remaining work explicitly unfinished in the PRD instead of claiming full completion.",
-    "PRD notes for completed stories should name the exact automated tests and verification commands that were rerun, especially when the story changed shared behavior or revalidated an earlier story."
+    "PRD notes for completed stories should name the exact automated tests and verification commands that were rerun, especially when the story changed shared behavior or revalidated an earlier story.",
+    "Prefer vertically sliced stories for each operator surface. Do not split essential parts of the same web, mobile, or desktop workflow into separate follow-up stories when the user would experience them as one feature.",
+    "Final hardening or release-readiness stories must have strictly lower priority than every unfinished implementation story they depend on.",
+    "When a story relies on prior backend or shared-package capabilities, record that relationship in a dependsOn field and keep the prerequisite at an earlier priority tier."
   ],
   "userStories": [
     {
@@ -92,24 +95,24 @@
       "notes": ""
     },
     {
-      "id": "US-005",
-      "title": "Support local mode with the same runtime contract",
-      "description": "As a developer, I want the same runtime model to work locally so that local and remote development follow the same session and workspace lifecycle.",
+      "id": "US-024",
+      "title": "Establish secure single-user credential bootstrap and pairing",
+      "description": "As a single-user operator, I want the control plane to generate and manage my credentials safely and let me pair a mobile client quickly so that I do not rely on hardcoded tokens or repeated manual token entry.",
       "acceptanceCriteria": [
-        "A local runtime can register with the server or attach directly in development mode",
-        "Local workspaces support the same session APIs as remote workspaces",
-        "Providers do not require separate local-only implementations",
-        "Clients clearly distinguish local and remote hosts",
-        "Local and remote flows share the same core runtime abstractions and tests prove the parity",
-        "At least one user-facing client can create or monitor a local-mode session through the same control-plane or runtime contract used for remote sessions"
+        "A first-run or explicit bootstrap flow can generate high-entropy operator and bootstrap tokens automatically when they are not already configured.",
+        "Generated credentials are stored in a documented local file or workstation-backed secure location with appropriate single-user protection expectations.",
+        "The operator has a documented way to inspect, rotate, or reissue credentials without editing source files.",
+        "At least one operator surface can produce a mobile pairing payload, such as a QR code or equivalent signed bootstrap blob, that lets the mobile app connect without retyping the token.",
+        "The server and shared auth or session layers expose the contracts needed for web, mobile, and desktop clients to restore saved operator connections across restarts.",
+        "Automated coverage proves the bootstrap flow, reissue path, and pairing payload generation end to end, and docs cover setup, storage location, and recovery path."
       ],
-      "priority": 2,
+      "priority": 1,
       "passes": false,
       "notes": "",
       "implementationNotes": [
-        "Do not satisfy this story by adding a separate mock-only local client path. The same runtime session lifecycle should back both local and remote flows.",
-        "The acceptance proof should show a real local repository path, a real local runtime mode, and the resulting local session appearing distinctly in a client surface."
-      ]
+        "This story establishes the secure single-user auth foundation. Client-specific storage and UI must still be completed inside the web, mobile, and desktop client stories."
+      ],
+      "dependsOn": ["US-003"]
     },
     {
       "id": "US-006",
@@ -129,7 +132,8 @@
       ],
       "priority": 1,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "dependsOn": ["US-003"]
     },
     {
       "id": "US-007",
@@ -149,7 +153,8 @@
       ],
       "priority": 1,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "dependsOn": ["US-003", "US-006", "US-008"]
     },
     {
       "id": "US-008",
@@ -234,6 +239,48 @@
       "notes": ""
     },
     {
+      "id": "US-019",
+      "title": "Persist audit records and expose audit APIs",
+      "description": "As a maintainer or administrator, I want an audit trail for session and access activity so that sensitive remote actions can be reviewed later.",
+      "acceptanceCriteria": [
+        "The audit log records session lifecycle events, approvals, provider choice, execution mode selection, workspace path, and port exposure changes.",
+        "Each entry includes actor, target, timestamp, and outcome.",
+        "Authorized clients can inspect audit records through an explicit API with filtering or pagination suitable for client inspectors.",
+        "Critical security-relevant events are not silently dropped.",
+        "The audit log survives restart and is covered by integration tests.",
+        "This story is responsible for persistence and API shape; client inspection UX belongs inside the web, mobile, and desktop client stories."
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "",
+      "implementationNotes": [
+        "Do not claim this story complete if audit data exists only as internal server state.",
+        "Client-side audit panes should be implemented with the client stories rather than deferred back into this backend story."
+      ],
+      "dependsOn": ["US-003", "US-007", "US-011", "US-012"]
+    },
+    {
+      "id": "US-005",
+      "title": "Support local mode with the same runtime contract",
+      "description": "As a developer, I want the same runtime model to work locally so that local and remote development follow the same session and workspace lifecycle.",
+      "acceptanceCriteria": [
+        "A local runtime can register with the server or attach directly in development mode",
+        "Local workspaces support the same session APIs as remote workspaces",
+        "Providers do not require separate local-only implementations",
+        "Clients clearly distinguish local and remote hosts",
+        "Local and remote flows share the same core runtime abstractions and tests prove the parity",
+        "At least one user-facing client can create or monitor a local-mode session through the same control-plane or runtime contract used for remote sessions"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "",
+      "implementationNotes": [
+        "Do not satisfy this story by adding a separate mock-only local client path. The same runtime session lifecycle should back both local and remote flows.",
+        "The acceptance proof should show a real local repository path, a real local runtime mode, and the resulting local session appearing distinctly in a client surface."
+      ],
+      "dependsOn": ["US-003", "US-007", "US-008"]
+    },
+    {
       "id": "US-013",
       "title": "Auto-detect common development ports",
       "description": "As a developer, I want the runtime to detect common listening ports so that previews are easy to find and expose when needed.",
@@ -252,81 +299,8 @@
       "implementationNotes": [
         "This story is not complete if the server can list synthetic detected ports but promotion fails from that exact list result.",
         "The key proof is: start a real listening service, detect it, show it in a client or API response, promote that exact detected port, and successfully reach the managed URL afterward."
-      ]
-    },
-    {
-      "id": "US-014",
-      "title": "Provide a web client",
-      "description": "As a developer, I want a browser-based client so that I can manage sessions, approvals, ports, and previews from any machine.",
-      "acceptanceCriteria": [
-        "The repo includes an actual runnable web app package with explicit local run and build commands",
-        "Users can sign in and view hosts, workspaces, sessions, approvals, forwarded ports, and detected ports",
-        "The web client can create and register a workspace by choosing a host and repository path, and it clearly shows the resulting working directory for sessions",
-        "The web client presents a Codex-style operator workspace layout with clear session navigation, a selected-session main pane, and a bottom-anchored prompt composer for new tasks and follow-up instructions",
-        "The web client can stream live session events",
-        "The web client can review diffs and respond to approvals",
-        "The web client can open forwarded HTTP previews",
-        "The web client persists the operator connection across app restarts for the single-user scope so the user does not need to re-enter the token every time",
-        "The web client has browser-focused integration or end-to-end smoke coverage for the core operator flow"
       ],
-      "implementationNotes": [
-        "The intended web layout is inspired by the Codex app: persistent navigation for repos or sessions, a central conversation or transcript pane for the active session, visible session controls and metadata near the top, and a prompt composer docked at the bottom.",
-        "Do not satisfy this story with a read-only dashboard. The operator should be able to create a workspace, start a session, and send follow-up prompts from the web surface."
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-015",
-      "title": "Provide a mobile app with React Native and Expo",
-      "description": "As a developer, I want a mobile app built with React Native and Expo so that I can monitor work, approve actions, and open previews from my phone.",
-      "acceptanceCriteria": [
-        "The repo includes an actual runnable Expo app with documented local run commands",
-        "The mobile app supports token-based authentication and host or session browsing",
-        "The mobile app can create a workspace by selecting a host and entering or importing a repository path, and it clearly shows what working directory a session will use",
-        "The mobile app adapts the same core operator model as web and desktop to a phone-friendly layout: session list or inbox navigation, selected-session transcript, quick approval actions, preview access, and a prompt composer suited to touch input",
-        "The mobile app receives live session state updates",
-        "The mobile app can approve or reject pending actions",
-        "The mobile app can open forwarded HTTP previews in-app or via the system browser",
-        "The mobile app persists its connection settings or token securely enough for a single-user self-hosted setup",
-        "The mobile app restores the saved connection across app restarts so the user does not need to manually re-enter the token during normal use",
-        "The mobile app can pair with the single-user control plane without requiring repeated manual token entry, such as by scanning a QR code or consuming an equivalent pairing payload generated by the operator surface",
-        "The mobile app has smoke or integration coverage for the primary operator flow"
-      ],
-      "implementationNotes": [
-        "Mobile does not need to clone the desktop layout exactly, but it should preserve the same mental model: create or choose a workspace, choose a session, read the transcript, send instructions, act on approvals, and open previews without dropping to raw APIs.",
-        "Use mobile-appropriate patterns such as tabs, stacked panes, bottom sheets, or drawers instead of forcing a cramped desktop multi-column layout."
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-016",
-      "title": "Provide a desktop app",
-      "description": "As a developer, I want a desktop app so that I can use Remote Dev Console as a primary control surface for both remote and local work.",
-      "acceptanceCriteria": [
-        "The repo includes an actual runnable desktop app package, not only a desktop client library",
-        "The desktop app can connect to the server and manage sessions",
-        "The desktop app can also work with local runtime flows",
-        "The desktop app reuses shared packages from the pnpm monorepo",
-        "Users can switch between local and remote workspaces in one interface",
-        "The desktop app can create and register a workspace by choosing a host and repository path, and it clearly shows the workspace path as the working directory for sessions",
-        "The desktop app presents a Codex-style operator workspace with session navigation, a selected-session transcript pane, visible session controls, and a bottom prompt composer for starting and continuing work",
-        "The desktop app stores its token or connection secrets in a desktop-appropriate way for a single-user setup",
-        "The desktop app restores the saved connection across app restarts so the user does not need to manually re-enter the token during normal use",
-        "The desktop app has smoke or integration coverage for the primary operator flow",
-        "The desktop shell renders a real UI for the operator flow instead of only exposing desktop-specific helper modules"
-      ],
-      "priority": 2,
-      "passes": false,
-      "notes": "",
-      "implementationNotes": [
-        "An Electron or Tauri shell is acceptable, but the result must include a real launchable desktop window and not just desktop-oriented TypeScript APIs.",
-        "The proof should include connection persistence, a visible workspace switcher, workspace creation from the UI, and at least one remote plus one local workflow exercised from the desktop surface.",
-        "The desktop experience should be the closest to the Codex-style reference: left-side navigation, central transcript, session metadata and controls in the active view, and a prompt input anchored near the bottom."
-      ]
+      "dependsOn": ["US-012"]
     },
     {
       "id": "US-017",
@@ -341,171 +315,158 @@
       ],
       "priority": 1,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "dependsOn": ["US-007"]
     },
     {
-      "id": "US-018",
-      "title": "Send notifications when user attention is required",
-      "description": "As a developer, I want notifications for approvals, failures, and completion so that I can react quickly when I am away from my main machine.",
+      "id": "US-014",
+      "title": "Deliver the web operator client",
+      "description": "As a developer, I want a browser-based client so that I can manage sessions, approvals, ports, and previews from any machine.",
       "acceptanceCriteria": [
-        "Users can opt in to notifications on supported clients",
-        "The system sends notifications for approval required, failed session, and completed session events",
-        "Notifications can deep-link into the related session where supported",
-        "Users can mute or customize notification categories",
-        "At least one supported client demonstrates end-to-end notification delivery in an automated test or documented smoke flow",
-        "API-only notification records or SSE events are not sufficient; at least one real client must show delivery, click handling, and deep-link behavior"
+        "The repo includes an actual runnable web app package with explicit local run and build commands.",
+        "Users can sign in from a browser, restore that saved operator connection across browser restarts for the single-user scope, and do not need to re-enter the token during normal use.",
+        "The web client can create and register a workspace by choosing a host and repository path, clearly shows the resulting working directory for sessions, and includes the normal workspace selection flow without requiring raw IDs.",
+        "The web client includes host onboarding and runtime readiness surfaces so an operator can add or pair a host, inspect connectivity or install state, and understand provider readiness without leaving the client.",
+        "The web client presents a Codex-style operator workspace with session navigation, a selected-session transcript pane, visible metadata and controls, and a bottom-anchored prompt composer for starting sessions and sending follow-up instructions.",
+        "The selected session view shows the original prompt, follow-up prompts, streamed output, approval state, diff review, preview links, execution mode details, workspace path, provider choice, and actionable failure diagnostics.",
+        "The web client includes an audit-oriented inspector for the current session and related approvals, ports, or host actions rather than leaving audit inspection as API-only.",
+        "The web client supports opt-in browser notifications for approval-required, failed-session, and completed-session events, including category controls and deep links back into the relevant session.",
+        "The web client can review diffs, respond to approvals, open forwarded HTTP previews, and display detected ports with promotion into managed forwards.",
+        "The web client has browser-focused integration or end-to-end coverage for the full operator flow, including workspace creation, onboarding/readiness, prompt composition, approvals, diagnostics, notifications, and audit inspection."
+      ],
+      "implementationNotes": [
+        "Treat this as the complete browser operator product slice. Do not defer core workflow pieces such as notifications, diagnostics, or audit visibility into separate browser-only follow-up stories.",
+        "The browser client must work from a separate development origin against the control plane with authenticated API requests and event streaming."
       ],
       "priority": 2,
       "passes": false,
       "notes": "",
-      "implementationNotes": [
-        "A web client is acceptable for this story if it covers permission handling, opt-in state, category muting, delivery, and click-through into the related session.",
-        "The acceptance proof should verify the user-visible click result, not just that the notification payload contains a deep link string."
+      "dependsOn": [
+        "US-003",
+        "US-006",
+        "US-007",
+        "US-011",
+        "US-012",
+        "US-013",
+        "US-019",
+        "US-021",
+        "US-024"
       ]
     },
     {
-      "id": "US-019",
-      "title": "Maintain an audit log for sensitive actions",
-      "description": "As a maintainer or administrator, I want an audit trail for session and access activity so that sensitive remote actions can be reviewed later.",
+      "id": "US-015",
+      "title": "Deliver the mobile operator client with Expo",
+      "description": "As a developer, I want a mobile app built with React Native and Expo so that I can monitor work, approve actions, and open previews from my phone.",
       "acceptanceCriteria": [
-        "The audit log records session lifecycle events, approvals, provider choice, and port exposure changes",
-        "Each entry includes actor, target, timestamp, and outcome",
-        "Authorized users can inspect the audit log",
-        "Critical security-relevant events are not silently dropped",
-        "The audit log survives restart and is covered by integration tests",
-        "The audit log is available through an explicit API or client surface rather than existing only as internal stored state"
+        "The repo includes an actual runnable Expo app with documented local run commands.",
+        "The mobile app can pair with the single-user control plane using the generated pairing flow, persist that connection securely enough for the self-hosted scope, and restore it across normal app restarts.",
+        "The mobile app can create a workspace by selecting a host and entering or importing a repository path, and it clearly shows what working directory a session will use.",
+        "The mobile app exposes host onboarding and runtime readiness information in a phone-appropriate flow so an operator can pair a host, inspect connectivity or install state, and understand provider readiness without raw API calls.",
+        "The mobile app adapts the same core operator model as web and desktop to a phone-friendly layout: session list or inbox navigation, selected-session transcript, touch-friendly prompt composer, quick approvals, preview access, and session controls.",
+        "The selected session view shows the original prompt, follow-up prompts, streamed output, approval state, execution mode, provider, workspace path, and actionable failure diagnostics in a mobile-appropriate presentation.",
+        "The mobile app exposes an audit-oriented inspector for the current session and related approvals, ports, or host actions rather than leaving those details to raw APIs.",
+        "The mobile app supports opt-in notifications for approval-required, failed-session, and completed-session events, and notification taps can reopen the related session where the platform allows it.",
+        "The mobile app can approve or reject pending actions, open forwarded previews, and surface detected ports or other related session artifacts that matter for operator decisions.",
+        "The mobile app has smoke or integration coverage for the primary operator flow, including pairing, workspace creation, prompt composition, approvals, diagnostics, notifications, and recovery after reconnect."
+      ],
+      "implementationNotes": [
+        "Mobile should preserve the same operator mental model as web and desktop, but it may adapt layout and controls to stacked panes, tabs, drawers, or bottom sheets.",
+        "Do not treat QR or pairing import as a standalone feature disconnected from the normal mobile operator experience."
       ],
       "priority": 2,
       "passes": false,
       "notes": "",
-      "implementationNotes": [
-        "Audit entries should be easy to correlate back to sessions, approvals, ports, or hosts using stable identifiers in the payload.",
-        "This story should revalidate earlier flows that are expected to emit audit events instead of adding isolated audit-only fixtures."
+      "dependsOn": [
+        "US-003",
+        "US-006",
+        "US-007",
+        "US-011",
+        "US-012",
+        "US-017",
+        "US-019",
+        "US-021",
+        "US-024"
       ]
     },
     {
-      "id": "US-020",
-      "title": "Document self-hosting, usage, and development workflows",
-      "description": "As a developer, I want clear documentation so that I can self-host the project, connect runtimes, run the clients, and contribute to the pnpm monorepo.",
+      "id": "US-016",
+      "title": "Deliver the desktop operator client",
+      "description": "As a developer, I want a desktop app so that I can use Remote Dev Console as a primary control surface for both remote and local work.",
       "acceptanceCriteria": [
-        "The root README includes a quickstart for install, local run commands, verification commands, and the main repo layout",
-        "Documentation covers server deployment, runtime install, and client setup",
-        "Documentation explains the pnpm monorepo layout and developer commands",
-        "Documentation includes provider setup for Claude Code, Codex, and OpenCode",
-        "Documentation explains port forwarding behavior, auth expectations, and security boundaries",
-        "Documentation clearly distinguishes what is production-ready, what is MVP, and what is still incomplete",
-        "README smoke commands and run commands reflect the branch's actual runnable packages and verified behavior",
-        "Browser client docs explain which control-plane origin to use in development and any cross-origin or reverse-proxy requirements for authenticated API and event-stream access",
-        "Docs explain how single-user credentials are generated, where they are stored, how an operator retrieves or rotates them, and how mobile pairing or QR onboarding works",
-        "Docs describe the intended shared client layout and information architecture for web, desktop, and the mobile-adapted session workspace",
-        "Docs explain how operators create a workspace from each client surface and make clear that the workspace path is the session working directory",
-        "Docs explain what packaged desktop or mobile artifacts exist, how to build them, and what remains required for installation or distribution"
+        "The repo includes an actual runnable desktop app package with a real launchable desktop window, not only a desktop client library.",
+        "The desktop app can connect to the server, manage sessions, and operate both local and remote runtime flows from one interface.",
+        "The desktop app can create and register a workspace by choosing a host and repository path, clearly shows the workspace path as the working directory for sessions, and lets users switch between local and remote workspaces without raw IDs.",
+        "The desktop app includes host onboarding and runtime readiness surfaces so an operator can pair a host, inspect connectivity or install state, and understand provider readiness directly from the desktop client.",
+        "The desktop app presents the closest Codex-style operator workspace: session navigation, selected-session transcript, visible session controls, prompt composer, approval handling, previews, and session artifacts in one desktop workflow.",
+        "The selected session view shows the original prompt, follow-up prompts, streamed output, audit information, execution mode, provider, workspace path, and actionable failure diagnostics that help an operator recover.",
+        "The desktop app stores its token or connection secrets in a desktop-appropriate secure location for a single-user setup and restores the saved connection across app restarts.",
+        "The desktop app includes an audit-oriented inspector for the current session and related approvals, ports, or host actions rather than leaving those details to raw APIs.",
+        "The desktop app supports operator notifications for approval-required, failed-session, and completed-session events in a desktop-appropriate way, with deep links into the session where supported.",
+        "The desktop app has smoke or integration coverage for the primary operator flow, including secure reconnect, workspace creation, onboarding/readiness, prompt composition, approvals, diagnostics, notifications, and preview access."
       ],
       "priority": 2,
       "passes": false,
       "notes": "",
       "implementationNotes": [
-        "Do not document flows that are not actually runnable on the branch tip.",
-        "When features remain incomplete, the docs should say so plainly instead of implying full support."
+        "Treat this as the full desktop product slice rather than a shell plus later follow-up UX stories.",
+        "The desktop client should be the closest to the Codex app reference, while still fitting the product architecture and a single-user self-hosted workflow."
+      ],
+      "dependsOn": [
+        "US-003",
+        "US-005",
+        "US-006",
+        "US-007",
+        "US-011",
+        "US-012",
+        "US-017",
+        "US-019",
+        "US-021",
+        "US-024"
       ]
     },
     {
       "id": "US-021",
-      "title": "Establish product-owned automated test coverage",
+      "title": "Enforce integrated product verification and regression coverage",
       "description": "As a maintainer, I want product-owned unit, integration, and end-to-end tests so that story completion is validated by the application itself rather than only by Ralph.",
       "acceptanceCriteria": [
-        "Core shared packages have unit tests for their business logic",
-        "Server and runtime flows have integration tests that exercise real package boundaries",
-        "At least the primary operator journeys for server plus client surfaces have smoke or end-to-end coverage where practical",
-        "The root verification command runs product-owned tests in addition to Ralph loop tests",
-        "Test ownership and test scope are documented so future stories extend the right test layer",
-        "Stories that modify shared behavior must update the relevant regression tests instead of relying only on new story-specific tests"
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-022",
-      "title": "Improve the README for operators and contributors",
-      "description": "As an operator or contributor, I want a README that quickly tells me what this project is, what is runnable today, and how to work on it so that I do not need to reverse-engineer the repo.",
-      "acceptanceCriteria": [
-        "The README explains the product at a high level and names the major apps and packages",
-        "The README includes a practical quickstart for booting the control plane and any currently runnable clients",
-        "The README includes manual smoke-test commands for the MVP",
-        "The README explains the branch strategy for Ralph loop attempts and how to start a new attempt",
-        "The README links to the deeper docs for runtime install, architecture, provider setup, and security expectations"
-      ],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-023",
-      "title": "Run a final regression and release-readiness pass",
-      "description": "As a maintainer, I want a final integration hardening pass so that the branch only claims completion when the combined system still works end to end after all stories land.",
-      "acceptanceCriteria": [
-        "The full root verification command passes on the final branch tip after all completed stories are integrated together",
-        "Key operator flows are revalidated end to end: server startup, workspace registration, session lifecycle, approvals, diff review, forwarded ports, detected port promotion, notifications, session recovery, browser-client sign-in from a separate local development origin, and single-user credential or pairing bootstrap",
-        "Any regressions introduced by later stories are fixed before the PRD is marked complete",
-        "The final PRD notes identify which high-risk earlier stories were revalidated during the hardening pass",
-        "README and supporting docs reflect the final integrated behavior rather than only per-story local changes",
-        "This story runs only after all other intended implementation stories for the branch are complete"
-      ],
-      "priority": 3,
-      "implementationNotes": [
-        "This is a hardening and final-validation story, not a substitute for unfinished feature stories.",
-        "It may make small integration fixes, but it should not be used to declare missing major capabilities acceptable.",
-        "Browser sign-in proof should include a real cross-origin request path, not just same-origin helpers that bypass browser preflight behavior.",
-        "Single-user auth proof should cover generated credential storage or retrieval plus mobile pairing import instead of relying only on manually typed tokens."
-      ],
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-024",
-      "title": "Add secure single-user credential bootstrap and mobile pairing",
-      "description": "As a single-user operator, I want the control plane to generate and manage my credentials safely and let me pair a mobile client quickly so that I do not rely on hardcoded tokens or repeated manual token entry.",
-      "acceptanceCriteria": [
-        "A first-run or explicit bootstrap flow can generate high-entropy operator and bootstrap tokens automatically when they are not already configured",
-        "Generated credentials are stored in a documented local file or workstation-backed secure location with appropriate single-user protection expectations",
-        "The operator has a documented way to inspect, rotate, or reissue credentials without editing source files",
-        "Web, desktop, and mobile clients can restore the saved operator connection across normal app restarts using their platform-appropriate storage path",
-        "At least one operator surface can produce a mobile pairing payload, such as a QR code or equivalent signed bootstrap blob, that lets the mobile app connect without retyping the token",
-        "The mobile client can import the pairing payload and persist the resulting connection securely enough for the single-user self-hosted scope",
-        "Automated coverage proves the bootstrap flow and mobile pairing flow end to end, and docs cover the setup, storage location, and recovery path"
+        "Core shared packages have unit tests for their business logic.",
+        "Server and runtime flows have integration tests that exercise real package boundaries.",
+        "Primary operator journeys for web, mobile, and desktop have smoke or end-to-end coverage where practical.",
+        "The root verification command runs product-owned tests in addition to Ralph loop tests and fails on product regressions.",
+        "Test ownership and test scope are documented so future stories extend the right test layer.",
+        "Stories that modify shared behavior update the relevant regression tests instead of relying only on new story-specific tests.",
+        "The verification suite is stable enough that known timing-sensitive tests are either hardened or explicitly isolated and documented; a story should not be considered complete when the main verification gate is routinely flaky."
       ],
       "priority": 2,
       "passes": false,
       "notes": "",
+      "dependsOn": ["US-003", "US-006", "US-007", "US-014", "US-015", "US-016"],
       "implementationNotes": [
-        "This story should not be satisfied by a README that says to invent a token manually.",
-        "A QR code is acceptable if it carries only the information needed for pairing and is generated from the real operator-configured credentials.",
-        "If full token rotation is too broad, at minimum provide reissue or regeneration with clear operator steps and tests."
+        "This story is about the product verification system, not just adding more tests. The final result should make later client and hardening stories trustworthy."
       ]
     },
     {
-      "id": "US-025",
-      "title": "Deliver a unified Codex-style session workspace across clients",
-      "description": "As an operator, I want the web, desktop, and mobile clients to share a recognizable session workspace so that creating prompts, monitoring progress, and taking actions feels consistent across devices.",
+      "id": "US-020",
+      "title": "Document operator, developer, and packaging workflows",
+      "description": "As a developer, I want clear documentation so that I can self-host the project, connect runtimes, run the clients, and contribute to the pnpm monorepo.",
       "acceptanceCriteria": [
-        "Web and desktop provide a Codex-style primary workspace with session or thread navigation, a selected-session transcript pane, visible session metadata and controls, and a prompt composer for starting sessions and sending follow-up instructions",
-        "Mobile adapts the same information architecture to a smaller screen using phone-appropriate patterns such as tabs, drawers, stacked panes, or bottom sheets while preserving the same core operator tasks",
-        "Workspace creation and workspace selection are part of the normal client workflow on web, desktop, and mobile, and the UI makes it obvious which repository path is backing the current session",
-        "The selected session view shows the original prompt or task, follow-up prompts, streamed output, approval state, and access to related artifacts such as diffs, previews, or notifications",
-        "Normal operator actions such as creating a session, sending a follow-up prompt, pausing or resuming work, handling approvals, and opening previews are available from the client workspace rather than requiring raw API calls",
-        "The shared layout and interaction model are documented with enough detail that future stories can extend it consistently across clients",
-        "Automated coverage or documented smoke flows prove the prompt composer and session-workspace interactions on web, desktop, and the mobile-adapted view"
+        "The root README includes a quickstart for install, local run commands, verification commands, the main repo layout, and the current Ralph attempt workflow.",
+        "Documentation covers server deployment, runtime install, workspace creation, client setup, and operator onboarding for web, mobile, and desktop.",
+        "Documentation explains provider setup for Claude Code, Codex, and OpenCode, including the non-interactive runtime expectations of the product.",
+        "Documentation explains port forwarding, detected port promotion, auth expectations, security boundaries, audit visibility, and recovery behavior.",
+        "Documentation explains single-user credential bootstrap, storage, retrieval, rotation or reissue, and mobile pairing.",
+        "Documentation describes the shared client layout and information architecture for web, desktop, and the mobile-adapted operator workspace.",
+        "Documentation explains packaging commands, output locations, environment requirements, and any remaining signing or store-submission prerequisites.",
+        "README and supporting docs honestly distinguish what is production-ready, what is MVP, and what is still incomplete.",
+        "README smoke commands and run commands reflect the branch tip exactly and are validated by automated tests or smoke checks."
       ],
-      "priority": 2,
+      "priority": 4,
       "passes": false,
       "notes": "",
       "implementationNotes": [
-        "Do not treat this as pixel-perfect cloning of the Codex app. The goal is a similar mental model and operator workflow, not an exact brand or chrome copy.",
-        "The desktop and web clients should be closest to the reference. Mobile should preserve the same tasks and hierarchy while adapting layout and controls to touch and narrow screens.",
-        "The prompt composer should support both starting a new session and sending follow-up instructions to an existing session.",
-        "A user should not need to know or type a workspace ID to begin work in normal operation; selecting or creating the workspace should be enough."
-      ]
+        "This story replaces the old split between general docs and README polish. Keep one coherent docs story so operators and contributors do not get conflicting guidance."
+      ],
+      "dependsOn": ["US-014", "US-015", "US-016", "US-024", "US-026"]
     },
     {
       "id": "US-026",
@@ -519,53 +480,38 @@
         "Automated coverage or documented smoke flows prove that packaged builds launch successfully and can connect to the control plane in at least one supported desktop path and one supported mobile path",
         "Any remaining signing, notarization, store-submission, or vendor account prerequisites are called out explicitly instead of being implied as complete"
       ],
-      "priority": 3,
+      "priority": 4,
       "passes": false,
       "notes": "",
       "implementationNotes": [
         "This story is about installable artifacts, not just successful TypeScript builds.",
         "A practical MVP can target one desktop platform first, but the output should be something an operator can install or unpack without running the repo in dev mode.",
         "For mobile, it is acceptable to document a concrete EAS or equivalent build pipeline if the resulting artifact path and operator steps are real and tested."
-      ]
+      ],
+      "dependsOn": ["US-015", "US-016", "US-020"]
     },
     {
-      "id": "US-027",
-      "title": "Manage host onboarding and runtime readiness from the clients",
-      "description": "As an operator, I want to add hosts, pair local or remote runtimes, and verify provider readiness from the client surfaces so that normal setup does not require curl commands or hidden bootstrap details.",
+      "id": "US-023",
+      "title": "Run a final regression and release-readiness pass",
+      "description": "As a maintainer, I want a final integration hardening pass so that the branch only claims completion when the combined system still works end to end after all stories land.",
       "acceptanceCriteria": [
-        "Web, desktop, and mobile provide an operator flow to add or pair a host or runtime without requiring raw API calls for the normal single-user setup path",
-        "Client surfaces can show the runtime's host mode, connectivity, health, install state, and any last reported error in a setup-oriented view",
-        "The operator can obtain or trigger the appropriate bootstrap or pairing material for local and remote runtime onboarding from a client surface",
-        "Client surfaces expose provider readiness checks for the selected host or runtime, such as whether Claude Code, Codex, and OpenCode are installed and available",
-        "Setup and readiness failures are explained in actionable language so the operator knows whether the issue is auth, networking, runtime install, provider install, or provider login",
-        "Automated coverage or documented smoke flows prove a full operator path for onboarding a host or runtime and verifying provider readiness from at least one client surface"
+        "The full root verification command passes on the final branch tip after all completed stories are integrated together.",
+        "Key operator flows are revalidated end to end: server startup, credential bootstrap, workspace registration, session lifecycle, approvals, diff review, forwarded ports, detected port promotion, notifications, audit inspection, runtime onboarding, packaged-client launch smoke paths, session recovery, and browser-client sign-in from a separate local development origin.",
+        "Any regressions introduced by later stories are fixed before the PRD is marked complete.",
+        "The final PRD notes identify which high-risk earlier stories were revalidated during the hardening pass.",
+        "README and supporting docs reflect the final integrated behavior rather than only per-story local changes.",
+        "This story runs only after all other intended implementation stories for the branch are complete, including packaging."
       ],
-      "priority": 2,
+      "priority": 5,
+      "implementationNotes": [
+        "This is a hardening and final-validation story, not a substitute for unfinished feature stories.",
+        "It may make small integration fixes, but it should not be used to declare missing major capabilities acceptable.",
+        "Browser sign-in proof should include a real cross-origin request path, not just same-origin helpers that bypass browser preflight behavior.",
+        "Single-user auth proof should cover generated credential storage or retrieval plus mobile pairing import instead of relying only on manually typed tokens."
+      ],
       "passes": false,
       "notes": "",
-      "implementationNotes": [
-        "This story is about operator setup UX, not only backend endpoints. The operator should not need to keep a separate README open just to register a host in normal use.",
-        "A mobile-adapted flow is acceptable if it surfaces the same setup state and pairing path, even if the desktop or web client remains the primary onboarding surface."
-      ]
-    },
-    {
-      "id": "US-028",
-      "title": "Expose audit, execution options, and diagnostics in the clients",
-      "description": "As an operator, I want to inspect audit history, choose execution options, and understand why sessions fail so that I can trust and operate the system without dropping to logs or raw APIs.",
-      "acceptanceCriteria": [
-        "Web, desktop, and mobile expose an audit-oriented view or inspector for the current session and related approvals, ports, or host actions instead of leaving audit inspection as API-only",
-        "Client session creation surfaces expose the relevant execution options supported by the product, such as direct versus worktree mode and any dirty-worktree allowance, with clear explanations of the tradeoffs",
-        "Client session views surface actionable failure diagnostics, including provider launch failures, approval waits, runtime disconnects, and provider readiness issues, in a way that helps the operator recover",
-        "Operators can see enough context in the session view to understand what provider was used, what workspace path it ran in, what prompt was sent, and what execution mode was selected",
-        "Automated coverage or documented smoke flows prove that audit inspection, execution-option selection, and failure-diagnostic views are usable from at least one client surface"
-      ],
-      "priority": 2,
-      "passes": false,
-      "notes": "",
-      "implementationNotes": [
-        "This story should not be satisfied by linking the user to raw JSON or curl commands alone. The point is to make operational understanding part of the client experience.",
-        "Keep execution options visible but understandable. Operators should not need to know internal field names such as `workspaceMode` to use them correctly."
-      ]
+      "dependsOn": ["US-020", "US-021", "US-026"]
     }
   ]
 }
