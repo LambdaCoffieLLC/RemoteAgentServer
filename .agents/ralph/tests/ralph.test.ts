@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildPrompt, validatePrdChanges } from '../ralph.js'
+import { buildExecutionPrompt, buildPlanPrompt, buildPrompt, validatePrdChanges } from '../ralph.js'
 import type { Prd } from '../ralph.js'
 
 test('buildPrompt injects rules, prd, and learnings', () => {
@@ -21,6 +21,43 @@ test('buildPrompt injects rules, prd, and learnings', () => {
   assert.match(prompt, /RemoteAgentServer/)
   assert.match(prompt, /Existing learning/)
   assert.match(prompt, /TARGET STORY/)
+})
+
+test('buildPlanPrompt makes the planning phase read-only', () => {
+  const targetStory = { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: [], priority: 1 }
+  const prompt = buildPlanPrompt(
+    {
+      project: 'RemoteAgentServer',
+      branchName: 'main',
+      userStories: [targetStory],
+    },
+    'Existing learning',
+    'Follow the rules.',
+    targetStory,
+  )
+
+  assert.match(prompt, /planning phase only/i)
+  assert.match(prompt, /Do not modify files/i)
+  assert.match(prompt, /files you expect to create or edit/i)
+})
+
+test('buildExecutionPrompt injects the saved implementation plan', () => {
+  const targetStory = { id: 'US-001', title: 'Story', description: 'Desc', acceptanceCriteria: [], priority: 1 }
+  const prompt = buildExecutionPrompt(
+    {
+      project: 'RemoteAgentServer',
+      branchName: 'main',
+      userStories: [targetStory],
+    },
+    'Existing learning',
+    'Follow the rules.',
+    targetStory,
+    '- edit apps/web/src/main.tsx\n- update tests/web-client.test.ts',
+  )
+
+  assert.match(prompt, /IMPLEMENTATION PLAN/)
+  assert.match(prompt, /apps\/web\/src\/main\.tsx/)
+  assert.match(prompt, /You have already completed a planning pass/i)
 })
 
 test('validatePrdChanges allows one story to move to passed with notes', () => {

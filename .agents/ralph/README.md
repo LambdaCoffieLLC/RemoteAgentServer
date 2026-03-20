@@ -17,6 +17,8 @@ Optional overrides:
 RALPH_CODEX_SANDBOX=workspace-write
 RALPH_CODEX_BYPASS=false
 RALPH_CODEX_SEARCH=true
+RALPH_PLAN_FIRST=true
+RALPH_PLAN_SANDBOX=read-only
 RALPH_VERIFY_COMMAND="pnpm verify:ralph"
 ```
 
@@ -26,6 +28,7 @@ RALPH_VERIFY_COMMAND="pnpm verify:ralph"
 - `CODEX.md` - Codex instructions injected into each run
 - `learnings.md` - append-only notes for future iterations
 - `logs/` - logs grouped by user story, with timestamped files inside each story directory
+- `plans/` - saved planning artifacts for each story attempt before execution starts
 - `verification/` - per-story attempt artifacts with changed-file and automated-test signals
 - `latest-run.json` - pointer to the current run's log files
 - `tests/` - smoke coverage for PRD validation and prompt construction
@@ -36,6 +39,9 @@ RALPH_VERIFY_COMMAND="pnpm verify:ralph"
 - This runner expects a clean git worktree before it starts.
 - Codex is launched with `workspace-write` by default so implementation stories are not accidentally run in `read-only` mode.
 - `pnpm ralph:danger` runs the same loop with `--dangerously-bypass-approvals-and-sandbox`.
+- Ralph now runs in two phases by default: a read-only planning pass, then the execution pass against the saved plan artifact.
+- If the planning phase edits files or mutates `prd.json` / `learnings.md`, Ralph rejects the attempt and rolls it back.
+- `RALPH_PLAN_FIRST=false` disables the planning pass if you need to debug the old single-pass behavior.
 - Current Codex CLI sandbox modes are `read-only`, `workspace-write`, and `danger-full-access`.
 - `--dangerously-bypass-approvals-and-sandbox` is broader than `danger-full-access` because it removes both sandboxing and approval gates.
 - Ralph now binds each Codex run to one explicit target story and rejects PRD updates for a different story.

@@ -21,6 +21,7 @@ const lastStoryFile = resolve(scriptDir, '.last-story')
 const logsDir = resolve(scriptDir, 'logs')
 const latestRunFile = resolve(scriptDir, 'latest-run.json')
 const verificationDir = resolve(scriptDir, 'verification')
+const plansDir = resolve(scriptDir, 'plans')
 
 const maxIterations = Number(process.env.RALPH_MAX_ITERATIONS ?? '5')
 const testCommand = (process.env.RALPH_VERIFY_COMMAND ?? 'pnpm verify:ralph').trim()
@@ -28,11 +29,14 @@ const codexSandbox = process.env.RALPH_CODEX_SANDBOX ?? 'workspace-write'
 const codexBypassEnabled = process.env.RALPH_CODEX_BYPASS === 'true'
 const codexSearchEnabled = process.env.RALPH_CODEX_SEARCH === 'true'
 const autoCleanEnabled = process.env.RALPH_AUTO_CLEAN === 'true'
+const planFirstEnabled = process.env.RALPH_PLAN_FIRST !== 'false'
+const planSandbox = process.env.RALPH_PLAN_SANDBOX ?? 'read-only'
 const missing = Symbol('missing')
 const runStamp = new Date().toISOString().replace(/[:.]/g, '-')
 const cleanupTargets = [
   '.agents/ralph/latest-run.json',
   '.agents/ralph/logs',
+  '.agents/ralph/plans',
   '.agents/ralph/verification',
   'apps',
   'packages',
@@ -59,6 +63,8 @@ type VerificationArtifact = {
   selectedStoryTitle: string | null
   matchedExpectedStory: boolean
   status:
+    | 'planning_failed'
+    | 'planning_modified_files'
     | 'success'
     | 'codex_not_done'
     | 'verification_failed'
@@ -83,6 +89,11 @@ type VerificationArtifact = {
     eventLogFile: string
     runLogFile: string
     lastMessageFile: string
+  }
+  planning?: {
+    enabled: boolean
+    sandbox: string | null
+    planFile: string | null
   }
   error?: string
 }
@@ -363,7 +374,45 @@ function writeVerificationArtifact(artifact: VerificationArtifact) {
 }
 
 export function buildPrompt(prd: Prd, learnings: string, promptRules: string, targetStory: Story) {
+  return buildExecutionPrompt(prd, learnings, promptRules, targetStory, '')
+}
+
+export function buildPlanPrompt(prd: Prd, learnings: string, promptRules: string, targetStory: Story) {
   return `${promptRules.trim()}
+
+You are in the planning phase only.
+Do not modify files, do not update prd.json, and do not append to learnings.md.
+Inspect the repo and return a concise implementation plan for the target story.
+The plan must include:
+- the files you expect to create or edit
+- the tests or verification you will add or update
+- the main implementation steps
+- any likely risks or dependencies
+
+--- TARGET STORY (THE ONLY STORY YOU MAY COMPLETE) ---
+${JSON.stringify(targetStory, null, 2)}
+
+--- PRD (READ-ONLY except allowed passes/notes for one story) ---
+${JSON.stringify(prd, null, 2)}
+
+--- EXISTING LEARNINGS (READ-ONLY) ---
+${learnings}`
+}
+
+export function buildExecutionPrompt(
+  prd: Prd,
+  learnings: string,
+  promptRules: string,
+  targetStory: Story,
+  implementationPlan: string,
+) {
+  return `${promptRules.trim()}
+
+You have already completed a planning pass for this story.
+Use the implementation plan below as the baseline for execution. You may refine it while working, but you must still satisfy the target story exactly.
+
+--- IMPLEMENTATION PLAN ---
+${implementationPlan.trim() || 'No plan text was captured.'}
 
 --- TARGET STORY (THE ONLY STORY YOU MAY COMPLETE) ---
 ${JSON.stringify(targetStory, null, 2)}
@@ -469,13 +518,32 @@ export function validatePrdChanges(beforePrd: Prd, afterPrd: Prd, expectedStoryI
   return changedStory
 }
 
-async function runCodex(prompt: string) {
+function getPlanFile(storyId: string, attempt: number) {
+  const storyDir = resolve(plansDir, sanitizeLogScope(storyId))
+  mkdirSync(storyDir, { recursive: true })
+  return resolve(storyDir, `${runStamp}-attempt-${String(attempt).padStart(2, '0')}.md`)
+}
+
+async function runCodex(
+  prompt: string,
+  {
+    phaseLabel = 'execution',
+    sandboxOverride,
+    bypassOverride,
+  }: {
+    phaseLabel?: 'planning' | 'execution'
+    sandboxOverride?: string
+    bypassOverride?: boolean
+  } = {},
+) {
   const { runLogFile, lastMessageFile } = getLogFiles()
   const args = ['exec']
-  if (codexBypassEnabled) {
+  const bypass = bypassOverride ?? codexBypassEnabled
+  const sandbox = sandboxOverride ?? codexSandbox
+  if (bypass) {
     args.push('--dangerously-bypass-approvals-and-sandbox')
   } else {
-    args.push('--sandbox', codexSandbox)
+    args.push('--sandbox', sandbox)
   }
   args.push('--output-last-message', lastMessageFile)
   if (codexSearchEnabled) {
@@ -483,9 +551,9 @@ async function runCodex(prompt: string) {
   }
 
   logEvent(
-    codexBypassEnabled
-      ? 'Starting codex run with bypass approvals+sandbox'
-      : `Starting codex run with sandbox=${codexSandbox}`,
+    bypass
+      ? `Starting codex ${phaseLabel} run with bypass approvals+sandbox`
+      : `Starting codex ${phaseLabel} run with sandbox=${sandbox}`,
   )
   writeFileSync(lastMessageFile, '')
   const result = await runStreaming('codex', args, { cwd: repoRoot, input: prompt, logFile: runLogFile })
@@ -518,7 +586,112 @@ async function runStory(promptRules: string, expectedStory: Story) {
     const prdBefore = loadPrd()
     const learningsBefore = readLearnings()
     const beforeTests = collectTestSignals()
-    const output = await runCodex(buildPrompt(prdBefore, learningsBefore, promptRules, expectedStory))
+    const planFile = planFirstEnabled ? getPlanFile(getStoryId(expectedStory), attempt) : null
+    let implementationPlan = ''
+
+    if (planFirstEnabled) {
+      const planOutput = await runCodex(buildPlanPrompt(prdBefore, learningsBefore, promptRules, expectedStory), {
+        phaseLabel: 'planning',
+        sandboxOverride: planSandbox,
+        bypassOverride: false,
+      })
+      const planningChangedFiles = getChangedFiles()
+      const prdAfterPlanning = loadPrd()
+      const learningsAfterPlanning = readLearnings()
+
+      if (planningChangedFiles.length > 0 || JSON.stringify(prdBefore) !== JSON.stringify(prdAfterPlanning) || learningsBefore !== learningsAfterPlanning) {
+        const logFiles = getLogFiles()
+        writeVerificationArtifact({
+          runStamp,
+          attempt,
+          expectedStoryId: getStoryId(expectedStory),
+          expectedStoryTitle: getStoryTitle(expectedStory),
+          selectedStoryId: null,
+          selectedStoryTitle: null,
+          matchedExpectedStory: false,
+          status: 'planning_modified_files',
+          verifyCommand: testCommand,
+          doneTokenSeen: false,
+          verificationPassed: false,
+          changedFiles: planningChangedFiles,
+          changedTestFiles: planningChangedFiles.filter(isTestFile),
+          beforeTests: {
+            fileCount: beforeTests.testFileCount,
+            caseCount: beforeTests.testCaseCount,
+          },
+          afterTests: {
+            fileCount: beforeTests.testFileCount,
+            caseCount: beforeTests.testCaseCount,
+          },
+          logs: {
+            eventLogFile: logFiles.eventLogFile,
+            runLogFile: logFiles.runLogFile,
+            lastMessageFile: logFiles.lastMessageFile,
+          },
+          planning: {
+            enabled: true,
+            sandbox: planSandbox,
+            planFile,
+          },
+          error: 'Planning phase modified the worktree or PRD/learnings state.',
+        })
+        logEvent('Planning phase modified files or mutable state; rolling back')
+        rollback()
+        continue
+      }
+
+      implementationPlan = planOutput.trim()
+      if (!implementationPlan) {
+        const logFiles = getLogFiles()
+        writeVerificationArtifact({
+          runStamp,
+          attempt,
+          expectedStoryId: getStoryId(expectedStory),
+          expectedStoryTitle: getStoryTitle(expectedStory),
+          selectedStoryId: null,
+          selectedStoryTitle: null,
+          matchedExpectedStory: false,
+          status: 'planning_failed',
+          verifyCommand: testCommand,
+          doneTokenSeen: false,
+          verificationPassed: false,
+          changedFiles: [],
+          changedTestFiles: [],
+          beforeTests: {
+            fileCount: beforeTests.testFileCount,
+            caseCount: beforeTests.testCaseCount,
+          },
+          afterTests: {
+            fileCount: beforeTests.testFileCount,
+            caseCount: beforeTests.testCaseCount,
+          },
+          logs: {
+            eventLogFile: logFiles.eventLogFile,
+            runLogFile: logFiles.runLogFile,
+            lastMessageFile: logFiles.lastMessageFile,
+          },
+          planning: {
+            enabled: true,
+            sandbox: planSandbox,
+            planFile,
+          },
+          error: 'Planning phase returned an empty plan.',
+        })
+        logEvent('Planning phase returned an empty plan; rolling back')
+        rollback()
+        continue
+      }
+
+      if (planFile) {
+        writeFileSync(planFile, implementationPlan + '\n')
+        logEvent(`Saved implementation plan: ${planFile}`)
+      }
+    }
+
+    const output = await runCodex(
+      buildExecutionPrompt(prdBefore, learningsBefore, promptRules, expectedStory, implementationPlan),
+      { phaseLabel: 'execution' },
+    )
 
     try {
       validateAppendOnly(learningsBefore)
@@ -567,6 +740,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
         },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
         error: error instanceof Error ? error.message : String(error),
       })
       logEvent(`PRD validation failed for ${getStoryId(expectedStory)}; rolling back`)
@@ -601,6 +779,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           eventLogFile: logFiles.eventLogFile,
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
+        },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
         },
       })
       logEvent('Codex did not report DONE; rolling back')
@@ -638,6 +821,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
         },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
       })
       logEvent('Verification failed; rolling back')
       rollback()
@@ -671,6 +859,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           eventLogFile: logFiles.eventLogFile,
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
+        },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
         },
       })
       logEvent('No story updated in PRD; rolling back')
@@ -706,6 +899,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
         },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
       })
       logEvent(`Expected ${getStoryId(expectedStory)} but Codex updated ${getStoryId(selectedStory)}; rolling back`)
       rollback()
@@ -740,6 +938,11 @@ async function runStory(promptRules: string, expectedStory: Story) {
           runLogFile: logFiles.runLogFile,
           lastMessageFile: logFiles.lastMessageFile,
         },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
       })
       logEvent(`Story ${String(selectedStory['id'])} was not marked passed; rolling back`)
       rollback()
@@ -768,12 +971,17 @@ async function runStory(promptRules: string, expectedStory: Story) {
         fileCount: afterTests.testFileCount,
         caseCount: afterTests.testCaseCount,
       },
-      logs: {
-        eventLogFile: logFiles.eventLogFile,
-        runLogFile: logFiles.runLogFile,
-        lastMessageFile: logFiles.lastMessageFile,
-      },
-    })
+        logs: {
+          eventLogFile: logFiles.eventLogFile,
+          runLogFile: logFiles.runLogFile,
+          lastMessageFile: logFiles.lastMessageFile,
+        },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
+      })
 
     writeFileSync(lastStoryFile, String(selectedStory['id']))
     if (commitStory(selectedStory)) {
@@ -799,6 +1007,7 @@ export async function main() {
       ? `Codex config: bypass=true search=${codexSearchEnabled}`
       : `Codex config: sandbox=${codexSandbox} search=${codexSearchEnabled}`,
   )
+  logEvent(`Plan-first config: enabled=${planFirstEnabled} sandbox=${planFirstEnabled ? planSandbox : 'disabled'}`)
   maybeHandleGeneratedArtifacts()
   ensureCleanRepo()
 
