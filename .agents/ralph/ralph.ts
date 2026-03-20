@@ -296,6 +296,17 @@ function loadPrd(): Prd {
   return JSON.parse(readFileSync(prdFile, 'utf8')) as Prd
 }
 
+function tryLoadPrd() {
+  try {
+    return { prd: loadPrd(), error: null }
+  } catch (error) {
+    return {
+      prd: null,
+      error: error instanceof Error ? error : new Error(String(error)),
+    }
+  }
+}
+
 function getStoryId(story: Story) {
   return String(story.id)
 }
@@ -596,10 +607,16 @@ async function runStory(promptRules: string, expectedStory: Story) {
         bypassOverride: false,
       })
       const planningChangedFiles = getChangedFiles()
-      const prdAfterPlanning = loadPrd()
+      const prdAfterPlanningResult = tryLoadPrd()
       const learningsAfterPlanning = readLearnings()
 
-      if (planningChangedFiles.length > 0 || JSON.stringify(prdBefore) !== JSON.stringify(prdAfterPlanning) || learningsBefore !== learningsAfterPlanning) {
+      if (
+        planningChangedFiles.length > 0 ||
+        prdAfterPlanningResult.error ||
+        !prdAfterPlanningResult.prd ||
+        JSON.stringify(prdBefore) !== JSON.stringify(prdAfterPlanningResult.prd) ||
+        learningsBefore !== learningsAfterPlanning
+      ) {
         const logFiles = getLogFiles()
         writeVerificationArtifact({
           runStamp,
@@ -633,7 +650,9 @@ async function runStory(promptRules: string, expectedStory: Story) {
             sandbox: planSandbox,
             planFile,
           },
-          error: 'Planning phase modified the worktree or PRD/learnings state.',
+          error:
+            prdAfterPlanningResult.error?.message ??
+            'Planning phase modified the worktree or PRD/learnings state.',
         })
         logEvent('Planning phase modified files or mutable state; rolling back')
         rollback()
@@ -700,7 +719,6 @@ async function runStory(promptRules: string, expectedStory: Story) {
       throw error
     }
 
-    const prdAfter = loadPrd()
     const done = output
       .split('\n')
       .some((line) => line.trim() === 'DONE')
@@ -708,6 +726,49 @@ async function runStory(promptRules: string, expectedStory: Story) {
     const changedTestFiles = changedFiles.filter(isTestFile)
     const afterTests = collectTestSignals()
     const logFiles = getLogFiles()
+    const prdAfterResult = tryLoadPrd()
+
+    if (prdAfterResult.error || !prdAfterResult.prd) {
+      writeVerificationArtifact({
+        runStamp,
+        attempt,
+        expectedStoryId: getStoryId(expectedStory),
+        expectedStoryTitle: getStoryTitle(expectedStory),
+        selectedStoryId: null,
+        selectedStoryTitle: null,
+        matchedExpectedStory: false,
+        status: 'invalid_prd_change',
+        verifyCommand: testCommand,
+        doneTokenSeen: done,
+        verificationPassed: false,
+        changedFiles,
+        changedTestFiles,
+        beforeTests: {
+          fileCount: beforeTests.testFileCount,
+          caseCount: beforeTests.testCaseCount,
+        },
+        afterTests: {
+          fileCount: afterTests.testFileCount,
+          caseCount: afterTests.testCaseCount,
+        },
+        logs: {
+          eventLogFile: logFiles.eventLogFile,
+          runLogFile: logFiles.runLogFile,
+          lastMessageFile: logFiles.lastMessageFile,
+        },
+        planning: {
+          enabled: planFirstEnabled,
+          sandbox: planFirstEnabled ? planSandbox : null,
+          planFile,
+        },
+        error: prdAfterResult.error.message,
+      })
+      logEvent(`Execution left prd.json invalid for ${getStoryId(expectedStory)}; rolling back`)
+      rollback()
+      continue
+    }
+
+    const prdAfter = prdAfterResult.prd
     let selectedStory: Story | null = null
 
     try {
