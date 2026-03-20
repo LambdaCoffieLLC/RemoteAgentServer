@@ -8,6 +8,8 @@
     "ralph:clean": "node scripts/ralph-clean.mjs",
     "ralph:clean:all": "node scripts/ralph-clean.mjs --include-node-modules",
     "ralph:danger": "RALPH_CODEX_BYPASS=true node --import tsx .agents/ralph/ralph.ts",
+    "ralph:worktree": "node scripts/ralph-worktree.mjs",
+    "ralph:worktree:path": "node scripts/ralph-worktree.mjs --print-path",
     "test": "node --import tsx --test .agents/ralph/tests/*.test.ts",
     "verify:ralph": "pnpm test && pnpm exec tsc --noEmit"
   },

@@ -11,6 +11,7 @@ pnpm test
 pnpm verify:ralph
 pnpm ralph
 pnpm ralph:danger
+pnpm ralph:worktree
 ```
 
 ## Layout
@@ -42,4 +43,5 @@ repo/
 - `pnpm ralph:clean:all` also removes the root `node_modules` if you want a fully cold reset.
 - `RALPH_AUTO_CLEAN=true pnpm ralph` lets Ralph run the same cleanup automatically before a fresh run.
 - If you mirror this repo to another machine with SyncThing, commit `.stignore` but keep any `.stfolder` local to each device.
+- `pnpm ralph:worktree` prepares a separate git worktree for the current PRD branch under `../.ralph-worktrees/<repo>/<branch>`, which is useful on the dev server so the synced folder can stay on clean `main`.
 - All user stories are reset to unfinished so Ralph can re-execute the entire PRD from the beginning.

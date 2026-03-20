@@ -9,6 +9,7 @@ pnpm install
 pnpm verify:ralph
 pnpm ralph
 pnpm ralph:danger
+pnpm ralph:worktree
 ```
 
 Optional overrides:
@@ -32,6 +33,7 @@ RALPH_VERIFY_COMMAND="pnpm verify:ralph"
 - `verification/` - per-story attempt artifacts with changed-file and automated-test signals
 - `latest-run.json` - pointer to the current run's log files
 - `tests/` - smoke coverage for PRD validation and prompt construction
+- `../../scripts/ralph-worktree.mjs` - helper to create a separate git worktree for the current PRD branch
 
 ## Notes
 
@@ -49,3 +51,4 @@ RALPH_VERIFY_COMMAND="pnpm verify:ralph"
 - Verification artifacts are written under `.agents/ralph/verification/<story-id>/` and record changed files plus before/after automated-test counts for each attempt.
 - Codex and verification output are streamed to the current run log while they execute, so long sessions do not hit subprocess buffer limits.
 - Runtime logs are written under `.agents/ralph/logs/<story-id>/` with timestamped files per invocation. Runner-level bootstrap logs go under `.agents/ralph/logs/_session/`.
+- On mirrored dev servers, prefer running Ralph from `pnpm ralph:worktree` so the SyncThing-backed base folder can stay on `main` while the attempt branch runs in a separate checkout.
