@@ -8,6 +8,9 @@
     "ralph:clean": "node scripts/ralph-clean.mjs",
     "ralph:clean:all": "node scripts/ralph-clean.mjs --include-node-modules",
     "ralph:danger": "RALPH_CODEX_BYPASS=true node --import tsx .agents/ralph/ralph.ts",
+    "repo:sync": "node scripts/repo-sync.mjs push",
+    "repo:sync:config": "node scripts/repo-sync.mjs config",
+    "repo:sync:status": "node scripts/repo-sync.mjs remote-status",
     "test": "node --import tsx --test .agents/ralph/tests/*.test.ts",
     "verify:ralph": "pnpm test && pnpm exec tsc --noEmit"
   },
